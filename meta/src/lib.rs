@@ -14,6 +14,7 @@ pub mod discid;
 pub mod lookup;
 pub mod naming;
 pub mod tag;
+pub mod throttle;
 
 pub use cache::MetaCache;
 pub use discid::{disc_id, mb_discid};
@@ -23,3 +24,4 @@ pub use lookup::{
 };
 pub use naming::{DEFAULT_TEMPLATE, ParseError, Template, sanitize};
 pub use tag::{TrackTags, apply};
+pub use throttle::Throttle;

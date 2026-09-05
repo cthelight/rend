@@ -78,6 +78,10 @@ remembered for the run — or the TUI session — so the same disc is never
 fetched twice: re-ripping a disc, or several parallel drives reading the
 same one, costs one lookup.
 
+Outgoing requests are paced to stay under MusicBrainz's one-request-per-
+second limit, and a request the server throttles (HTTP 503 or 429) is
+retried a couple of times with a short backoff.
+
 ### Ripping several drives in parallel
 
 Pass `-d` more than once (or `--all`) and `rip` reads every drive at

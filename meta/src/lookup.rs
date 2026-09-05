@@ -13,8 +13,13 @@
 //! with how far off each one is. The matched release yields album,
 //! artist, year, and
 //! track titles, plus a release id that [`cover_art`] uses to fetch the
-//! front cover from the Cover Art Archive.
+//! front cover from the Cover Art Archive. Every outgoing request is
+//! spaced out by a process-wide [`Throttle`] to stay under
+//! MusicBrainz's one-request-per-second limit, and a request the server
+//! throttles (HTTP 503 or 429) is retried after a short backoff.
 
+use std::sync::LazyLock;
+use std::thread;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -23,6 +28,7 @@ use ureq::config::Config;
 use ureq::{Agent, Error as HttpError};
 
 use crate::discid::mb_discid;
+use crate::throttle::Throttle;
 
 /// How long a single request may run before it is dropped.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -35,6 +41,14 @@ const DEBIAS: u32 = 150;
 /// A fuzzy candidate is accepted only if every track's duration is within
 /// this many milliseconds of the disc's.
 const FUZZY_TOLERANCE_MS: u64 = 5_000;
+/// MusicBrainz allows at most one request per second per IP address and
+/// answers faster bursts with a 503, so outgoing requests are spaced a
+/// little further apart than that.
+const MIN_REQUEST_GAP: Duration = Duration::from_millis(1_100);
+/// A request the server throttles (HTTP 503 or 429) is retried up to this
+/// many times in total, backing off by this long after each refusal.
+const MAX_ATTEMPTS: u32 = 3;
+const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 
 /// The disc's track layout, in LBA units.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -105,6 +119,11 @@ fn agent() -> Agent {
     Agent::new_with_config(config)
 }
 
+/// The process-wide request gate: every outgoing request reserves a slot
+/// here first, so no thread can outrun MusicBrainz's rate limit on its
+/// own.
+static THROTTLE: LazyLock<Throttle> = LazyLock::new(|| Throttle::new(MIN_REQUEST_GAP));
+
 /// A candidate match and how far off its worst track's duration is, in
 /// milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,17 +178,17 @@ pub fn lookup_disc_all(toc: &DiscToc) -> Result<Vec<DiscMeta>, Error> {
 /// difference. No tolerance applies — a distant release is still a
 /// candidate.
 pub fn lookup_candidates(toc: &DiscToc) -> Result<Vec<Candidate>, Error> {
-    candidates(toc)
+    candidates(toc, &THROTTLE)
 }
 
 /// Finds every candidate for the disc: first an exact disc-id hit (the
 /// TOC as reported, then shifted by the lead-in, since registered ids
 /// were computed from either), else a duration-ranked list.
-fn candidates(toc: &DiscToc) -> Result<Vec<Candidate>, Error> {
+fn candidates(toc: &DiscToc, throttle: &Throttle) -> Result<Vec<Candidate>, Error> {
     for &debias in [0u32, DEBIAS].iter() {
         let offsets: Vec<u32> = toc.offsets.iter().map(|&lba| lba + debias).collect();
         let id = mb_discid(toc.leadout + debias, &offsets);
-        match lookup_cdtoc(&id) {
+        match lookup_cdtoc(&id, throttle) {
             Ok(Some(meta)) => {
                 return Ok(vec![Candidate {
                     meta,
@@ -180,21 +199,21 @@ fn candidates(toc: &DiscToc) -> Result<Vec<Candidate>, Error> {
             Err(e) => return Err(e),
         }
     }
-    let releases = lookup_release_list(&toc_param(toc))?;
+    let releases = lookup_release_list(&toc_param(toc), throttle)?;
     Ok(rank_candidates(&releases.releases, toc).unwrap_or_default())
 }
 
 /// Looks up the disc with the given MusicBrainz disc id.
 ///
 /// Returns `Ok(None)` when the id is not registered.
-fn lookup_cdtoc(id: &str) -> Result<Option<DiscMeta>, Error> {
+fn lookup_cdtoc(id: &str, throttle: &Throttle) -> Result<Option<DiscMeta>, Error> {
     let url = format!("{MUSICBRAINZ}/ws/2/discid/{id}?fmt=json&inc=artists+recordings&cdstubs=no");
-    cdtoc_from(&url, id)
+    cdtoc_from(&url, id, throttle)
 }
 
-fn cdtoc_from(url: &str, id: &str) -> Result<Option<DiscMeta>, Error> {
+fn cdtoc_from(url: &str, id: &str, throttle: &Throttle) -> Result<Option<DiscMeta>, Error> {
     // A 404 means the id is not registered: no match, not an error.
-    let cdtoc: MbCdtoc = match get_json(url) {
+    let cdtoc: MbCdtoc = match get_json(url, throttle) {
         Ok(cdtoc) => cdtoc,
         Err(Error::NotFound) => return Ok(None),
         Err(e) => return Err(e),
@@ -225,11 +244,11 @@ fn pick_release_and_medium<'a>(
 
 /// Asks MusicBrainz for releases whose track durations resemble the TOC,
 /// encoded as `1+{last track}+{leadout}+{offsets…}`, `+`-separated.
-fn lookup_release_list(toc_param: &str) -> Result<MbReleaseList, Error> {
+fn lookup_release_list(toc_param: &str, throttle: &Throttle) -> Result<MbReleaseList, Error> {
     let url = format!(
         "{MUSICBRAINZ}/ws/2/discid/-?toc={toc_param}&fmt=json&inc=artists+recordings&limit=25"
     );
-    get_json(&url)
+    get_json(&url, throttle)
 }
 
 fn toc_param(toc: &DiscToc) -> String {
@@ -372,10 +391,15 @@ fn year_of(date: &str) -> Option<String> {
 /// Returns `None` when the release has no cover.
 pub fn cover_art(release_id: &str) -> Result<Option<Vec<u8>>, Error> {
     let url = format!("{COVER_ART}/release/{release_id}/front-250");
-    cover_art_from(&url)
+    cover_art_from(&url, &THROTTLE)
 }
 
-fn cover_art_from(url: &str) -> Result<Option<Vec<u8>>, Error> {
+fn cover_art_from(url: &str, throttle: &Throttle) -> Result<Option<Vec<u8>>, Error> {
+    with_retry(|| request_cover(url, throttle))
+}
+
+fn request_cover(url: &str, throttle: &Throttle) -> Result<Option<Vec<u8>>, Error> {
+    throttle.wait();
     match agent().get(url).call() {
         Ok(resp) => {
             let mut body = resp.into_body();
@@ -389,11 +413,17 @@ fn cover_art_from(url: &str) -> Result<Option<Vec<u8>>, Error> {
             }
         }
         Err(HttpError::StatusCode(404)) => Ok(None),
+        Err(HttpError::StatusCode(code)) => Err(Error::HttpStatus(code)),
         Err(e) => Err(network(e)),
     }
 }
 
-fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
+fn get_json<T: DeserializeOwned>(url: &str, throttle: &Throttle) -> Result<T, Error> {
+    with_retry(|| request_json(url, throttle))
+}
+
+fn request_json<T: DeserializeOwned>(url: &str, throttle: &Throttle) -> Result<T, Error> {
+    throttle.wait();
     match agent().get(url).call() {
         Ok(resp) => resp
             .into_body()
@@ -402,6 +432,24 @@ fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
         Err(HttpError::StatusCode(404)) => Err(Error::NotFound),
         Err(HttpError::StatusCode(code)) => Err(Error::HttpStatus(code)),
         Err(e) => Err(network(e)),
+    }
+}
+
+/// Runs `request`, retrying a throttled response (HTTP 503 or 429) after
+/// a short backoff, up to [`MAX_ATTEMPTS`] attempts in total.
+fn with_retry<T>(mut request: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match request() {
+            Ok(value) => return Ok(value),
+            Err(Error::HttpStatus(code))
+                if (code == 429 || code == 503) && attempt < MAX_ATTEMPTS =>
+            {
+                thread::sleep(RETRY_BACKOFF * attempt);
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -786,37 +834,52 @@ mod tests {
         assert_eq!(year_of(""), None);
     }
 
-    /// A throwaway HTTP server that answers one request with `status` and
-    /// `body`, so the ureq path can be exercised without the network.
-    fn serve_once(status: &str, body: &str) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
-        let status = status.to_string();
-        let body = body.to_string();
+    /// A throttle that never waits, so the HTTP tests stay fast.
+    fn fast_throttle() -> Throttle {
+        Throttle::new(Duration::ZERO)
+    }
+
+    /// A throwaway HTTP server that answers `responses` in order, one per
+    /// connection, so the ureq path can be exercised without the network.
+    fn serve_sequence(
+        responses: Vec<(&str, &str)>,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+        let responses: Vec<(String, String)> = responses
+            .into_iter()
+            .map(|(status, body)| (status.to_string(), body.to_string()))
+            .collect();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            // Drain the request until its header block ends.
-            let mut buf = Vec::new();
-            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                let mut tmp = [0u8; 1024];
-                match sock.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            for (status, body) in responses {
+                let (mut sock, _) = listener.accept().unwrap();
+                // Drain the request until its header block ends.
+                let mut buf = Vec::new();
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut tmp = [0u8; 1024];
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
                 }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(response.as_bytes()).ok();
             }
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            sock.write_all(response.as_bytes()).ok();
         });
         (addr, handle)
+    }
+
+    fn serve_once(status: &str, body: &str) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+        serve_sequence(vec![(status, body)])
     }
 
     #[test]
     fn cdtoc_roundtrips_over_http() {
         let (addr, handle) = serve_once("200 OK", EXACT);
-        let meta = cdtoc_from(&format!("http://{addr}/cdtoc"), "disc-1").unwrap();
+        let meta = cdtoc_from(&format!("http://{addr}/cdtoc"), "disc-1", &fast_throttle()).unwrap();
         handle.join().unwrap();
 
         let meta = meta.unwrap();
@@ -827,7 +890,7 @@ mod tests {
     #[test]
     fn cdtoc_404_is_no_match() {
         let (addr, handle) = serve_once("404 Not Found", "");
-        let meta = cdtoc_from(&format!("http://{addr}/cdtoc"), "disc-1").unwrap();
+        let meta = cdtoc_from(&format!("http://{addr}/cdtoc"), "disc-1", &fast_throttle()).unwrap();
         handle.join().unwrap();
 
         assert!(meta.is_none());
@@ -836,7 +899,8 @@ mod tests {
     #[test]
     fn release_list_roundtrips_over_http() {
         let (addr, handle) = serve_once("200 OK", FUZZY);
-        let list: MbReleaseList = get_json(&format!("http://{addr}/releases")).unwrap();
+        let list: MbReleaseList =
+            get_json(&format!("http://{addr}/releases"), &fast_throttle()).unwrap();
         handle.join().unwrap();
 
         assert_eq!(list.releases.len(), 2);
@@ -846,17 +910,28 @@ mod tests {
     #[test]
     fn release_list_404_is_not_found() {
         let (addr, handle) = serve_once("404 Not Found", "");
-        let err: Result<MbReleaseList, Error> = get_json(&format!("http://{addr}/releases"));
+        let err: Result<MbReleaseList, Error> =
+            get_json(&format!("http://{addr}/releases"), &fast_throttle());
         handle.join().unwrap();
 
         assert!(matches!(err, Err(Error::NotFound)));
     }
 
     #[test]
+    fn throttled_requests_are_retried() {
+        let (addr, handle) =
+            serve_sequence(vec![("503 Service Unavailable", ""), ("200 OK", EXACT)]);
+        let cdtoc: MbCdtoc = get_json(&format!("http://{addr}/cdtoc"), &fast_throttle()).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(cdtoc.releases.len(), 1);
+    }
+
+    #[test]
     fn cover_404_is_no_cover() {
         let (addr, handle) = serve_once("404 Not Found", "");
         let url = format!("http://{addr}/cover");
-        let art = crate::lookup::cover_art_from(&url).unwrap();
+        let art = crate::lookup::cover_art_from(&url, &fast_throttle()).unwrap();
         handle.join().unwrap();
 
         assert!(art.is_none());
