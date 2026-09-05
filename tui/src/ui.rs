@@ -354,11 +354,11 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     // The buttons are clickable, so they carry no keybind hints; the keys
     // still work and are listed in the help window (`?`).
     let btns = Layout::horizontal([
-        Constraint::Length(14),
-        Constraint::Length(9),
-        Constraint::Length(6),
-        Constraint::Length(7),
-        Constraint::Length(6),
+        Constraint::Length(18),
+        Constraint::Length(13),
+        Constraint::Length(10),
+        Constraint::Length(11),
+        Constraint::Length(10),
     ])
     .split(rows[2]);
 
@@ -461,21 +461,35 @@ fn draw_help(f: &mut Frame) {
     f.render_widget(Paragraph::new(lines), rect.inner(Margin::new(1, 1)));
 }
 
+/// One action button. The brackets and the colors mark it as clickable
+/// rather than plain text: bold cyan brackets when enabled, the whole
+/// button inverted on hover, and a flat dark gray when disabled.
 fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: bool) {
-    let mut style = if enabled {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+    let spans: Vec<Span> = if enabled && hovered {
+        vec![Span::styled(
+            format!(" [ {label} ] "),
+            Style::default().add_modifier(Modifier::REVERSED),
+        )]
     } else {
-        Style::default().fg(Color::DarkGray)
+        let bracket = if enabled {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let text = if enabled {
+            Style::default()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        vec![
+            Span::styled(" [ ", bracket),
+            Span::styled(label.to_string(), text),
+            Span::styled(" ] ", bracket),
+        ]
     };
-    if hovered && enabled {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(format!(" {label} "), style))),
-        rect,
-    );
+    f.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 /// The centered modal for editing the disc's tags.
@@ -812,8 +826,9 @@ mod tests {
 
         let plain = rendered(&mut app);
         // The action row reads like buttons, not keybind hints.
-        assert!(plain.contains("rip selected"));
-        assert!(plain.contains("rip all"));
+        assert!(plain.contains("[ rip selected ]"));
+        assert!(plain.contains("[ rip all ]"));
+        assert!(plain.contains("[ stop ]"));
         assert!(!plain.contains("[r]"));
         assert!(!plain.contains("[a]"));
         assert!(!plain.contains("press r"));
