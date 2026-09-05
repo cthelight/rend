@@ -21,6 +21,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rend_encode::Format;
+use rend_meta::{DEFAULT_TEMPLATE, Template};
 
 mod app;
 mod demo;
@@ -48,6 +49,13 @@ struct Cli {
     #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
     format: Format,
 
+    /// Naming template for the track files: `<artist>/<album>/<number>
+    /// <title>` by default, with the tokens `<artist>`, `<album>`,
+    /// `<album-artist>`, `<year>`, `<number>`, `<title>`, and
+    /// `<track-artist>`.
+    #[arg(short = 'T', long, default_value = DEFAULT_TEMPLATE)]
+    template: String,
+
     /// Overwrite existing files.
     #[arg(short, long)]
     force: bool,
@@ -69,11 +77,14 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> io::Result<()> {
+    let template = Template::parse(&cli.template)
+        .map_err(|e| io::Error::other(format!("invalid --template: {e}")))?;
     let mut app = App::new(
         cli.device.as_deref(),
         cli.output_dir.clone(),
         cli.force,
         cli.format,
+        template,
         cli.demo,
     );
     let mut terminal = setup_terminal()?;

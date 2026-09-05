@@ -18,7 +18,7 @@ around the Linux `cdrom` ioctl interface.
 ```sh
 rend drives                    # list CD-ROM devices
 rend toc                       # show disc table of contents
-rend rip                       # rip all audio tracks to ./<artist>/<NN> <title>.flac
+rend rip                       # rip all audio tracks to ./<artist>/<album>/<NN> <title>.flac
 rend rip -t 3 -t 5 -o ~/rips   # rip selected tracks to a directory
 rend rip -f                    # overwrite existing files
 rend rip -F wav                # output WAV instead of FLAC
@@ -33,11 +33,17 @@ rend -d /dev/sr1 toc           # use a specific device (default: first found)
 ```
 
 Ripped files are named after the looked-up metadata when it is available:
-each track goes into a per-artist directory as `<NN> <title>.<ext>`
-(e.g. `~/rips/The Band/01 First Song.flac`). Characters an SMB share would
-reject (`< > : " / \ | ? *`, any quote, control characters) are replaced
-with `_`. When no metadata is found (or `--no-metadata` is passed), the
-flat `trackNN.<ext>` naming is used instead. Progress is reported on stderr.
+each track goes into a per-artist, per-album directory as
+`<NN> <title>.<ext>` (e.g. `~/rips/The_Band/The_Album/01_First_Song.flac`).
+The layout follows a naming template — `<artist>/<album>/<number> <title>`
+by default, overridable with `-T`/`--template`, with the tokens
+`<artist>`, `<album>`, `<album-artist>`, `<year>`, `<number>`, `<title>`,
+and `<track-artist>` (the last component is the file name; a component
+that expands to nothing, like a missing year, is dropped). Every component
+is sanitized: any character that is not alphanumeric, an underscore, a
+period, or a dash is replaced with `_`. When no metadata is found (or
+`--no-metadata` is passed), the flat `trackNN.<ext>` naming is used
+instead. Progress is reported on stderr.
 
 ### Output format
 
@@ -78,9 +84,9 @@ rend rip -d /dev/sr0 -d /dev/sr1   # rip exactly these drives, in parallel
 ```
 
 Each drive writes into its own subdirectory of the output path, named
-after the device (`~/rips/sr0/<artist>/01 <title>.flac`,
-`~/rips/sr1/<artist>/01 <title>.flac`), so tracks from different drives
-never collide. Log lines are prefixed with the device
+after the device (`~/rips/sr0/<artist>/<album>/01 <title>.flac`,
+`~/rips/sr1/<artist>/<album>/01 <title>.flac`), so tracks from different
+drives never collide. Log lines are prefixed with the device
 (`[sr0] …`). With a single drive the output stays flat and live progress
 is shown, as before.
 
@@ -99,6 +105,7 @@ rend-tui                       # use the first CD-ROM device
 rend-tui -d /dev/sr1           # use a specific device
 rend-tui -o ~/rips -f          # rip to ~/rips, overwriting existing files
 rend-tui -F wav                # rip to WAV instead of FLAC
+rend-tui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-tui --demo                # simulated disc, no hardware required
 ```
 

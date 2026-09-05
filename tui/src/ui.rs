@@ -534,6 +534,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use rend_core::TrackType;
     use rend_encode::Format;
+    use rend_meta::Template;
 
     /// Renders the app once and returns the whole screen as one string.
     fn rendered(app: &mut App) -> String {
@@ -552,7 +553,14 @@ mod tests {
     #[test]
     fn draws_the_tags_editor_modal() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(None, dir.path().to_path_buf(), false, Format::Flac, true);
+        let mut app = App::new(
+            None,
+            dir.path().to_path_buf(),
+            false,
+            Format::Flac,
+            Template::default(),
+            true,
+        );
 
         // Without the editor, no modal is drawn.
         let plain = rendered(&mut app);

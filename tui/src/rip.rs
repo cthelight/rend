@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 
 use rend_core::{CddaStream, Device, FRAME_SIZE, FRAMES_PER_SECOND, FrameSource, Toc, Track};
 use rend_encode::Format;
-use rend_meta::{DiscMeta, TrackTags, apply, track_path};
+use rend_meta::{DiscMeta, Template, TrackTags, apply};
 
 use crate::demo::DemoSource;
 
@@ -74,6 +74,8 @@ pub struct RipJob {
     pub out_dir: PathBuf,
     /// The format the track files are written in.
     pub format: Format,
+    /// The naming template the track files are laid out with.
+    pub template: Template,
     pub force: bool,
     /// Set to make the worker stop between chunks.
     pub stop: Arc<AtomicBool>,
@@ -133,8 +135,8 @@ struct TrackSpec {
 
 impl TrackSpec {
     fn new(job: &RipJob, track: &Track, frames: u32) -> Self {
-        // With looked-up metadata the file is `<artist>/<NN> <title>`;
-        // without it the flat `trackNN` name is kept.
+        // With looked-up metadata the file path comes from the naming
+        // template; without it the flat `trackNN` name is kept.
         let path = match &job.meta {
             Some(disc) => {
                 let position = job
@@ -143,7 +145,7 @@ impl TrackSpec {
                     .position(|t| t.number == track.number)
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                track_path(
+                job.template.track_path(
                     &job.out_dir,
                     disc,
                     track.number,
@@ -287,6 +289,7 @@ mod tests {
             tracks,
             out_dir,
             format,
+            template: Template::default(),
             force,
             stop: Arc::new(AtomicBool::new(false)),
             meta: None,
@@ -395,6 +398,7 @@ mod tests {
             tracks: vec![3],
             out_dir: dir.path().to_path_buf(),
             format: Format::default(),
+            template: Template::default(),
             force: false,
             stop: Arc::new(AtomicBool::new(false)),
             meta: Some(crate::demo::demo_meta()),
@@ -404,7 +408,9 @@ mod tests {
         for _ in rx {}
         handle.join().unwrap();
 
-        let path = dir.path().join("The Demo Band/03 Short One.flac");
+        let path = dir
+            .path()
+            .join("The_Demo_Band/Demo_Album/03_Short_One.flac");
         let file = lofty::read_from_path(&path).unwrap();
         let tag = file
             .tag(lofty::tag::TagType::VorbisComments)

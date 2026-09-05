@@ -5,7 +5,7 @@
 //! disc's layout to MusicBrainz (exact disc id first, then a fuzzy
 //! duration match) while [`lookup_disc_all`] lists every candidate, and
 //! [`cover_art`] fetches the release's front cover — names the output
-//! files after the result ([`track_path`]), and writes it into the encoded
+//! files after the result ([`Template`]), and writes it into the encoded
 //! audio files with [`apply`].
 
 pub mod discid;
@@ -15,5 +15,5 @@ pub mod tag;
 
 pub use discid::{disc_id, mb_discid};
 pub use lookup::{DiscMeta, DiscToc, TrackMeta, cover_art, lookup_disc, lookup_disc_all};
-pub use naming::{disc_dir, sanitize, track_filename, track_path};
+pub use naming::{DEFAULT_TEMPLATE, ParseError, Template, sanitize};
 pub use tag::{TrackTags, apply};

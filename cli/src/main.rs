@@ -8,8 +8,8 @@ use clap::Parser;
 use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Toc, Track};
 use rend_encode::{Format, ffmpeg_available};
 use rend_meta::{
-    DiscMeta, DiscToc, TrackTags, apply, cover_art, disc_dir, disc_id, lookup_disc,
-    lookup_disc_all, track_path,
+    DEFAULT_TEMPLATE, DiscMeta, DiscToc, Template, TrackTags, apply, cover_art, disc_id,
+    lookup_disc, lookup_disc_all,
 };
 
 #[derive(Parser)]
@@ -57,6 +57,12 @@ struct RipArgs {
     /// Output format: flac (default, transcoded with ffmpeg) or wav.
     #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
     format: Format,
+    /// Naming template for the track files: `<artist>/<album>/<number>
+    /// <title>` by default, with the tokens `<artist>`, `<album>`,
+    /// `<album-artist>`, `<year>`, `<number>`, `<title>`, and
+    /// `<track-artist>`.
+    #[arg(short = 'T', long, default_value = DEFAULT_TEMPLATE)]
+    template: String,
     /// Only rip the given track number (repeatable; default: all audio tracks).
     #[arg(short = 't', long = "track")]
     tracks: Vec<u8>,
@@ -292,6 +298,7 @@ fn nth_candidate(candidates: &[DiscMeta], n: usize) -> Result<&DiscMeta, Error> 
 /// The options shared by a drive's rip worker and its per-track rips.
 struct RipOptions {
     format: Format,
+    template: Template,
     force: bool,
     no_metadata: bool,
     r#match: Option<usize>,
@@ -303,6 +310,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
     let RipArgs {
         output_dir,
         format,
+        template,
         tracks,
         force,
         all,
@@ -315,6 +323,8 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
                 .into(),
         ));
     }
+    let template = Template::parse(template)
+        .map_err(|e| Error::Unexpected(format!("invalid --template: {e}")))?;
     let resolved = rip_devices(devices, *all)?;
 
     // One drive keeps the flat layout; several get a subdirectory each, named
@@ -341,6 +351,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
             };
             let opts = RipOptions {
                 format: *format,
+                template: template.clone(),
                 force: *force,
                 no_metadata: *no_metadata,
                 r#match: *r#match,
@@ -444,24 +455,18 @@ fn rip_device(
         lookup_metadata(&toc, prefix)
     };
 
-    // With looked-up metadata the tracks live under an artist subdirectory;
-    // without it they stay flat in the output dir.
-    let base_dir = match &metadata {
-        Some((disc, _)) => disc_dir(out_dir, disc),
-        None => out_dir.to_path_buf(),
-    };
-
-    std::fs::create_dir_all(&base_dir)?;
     dev.spin_up().ok();
 
     let mut failed = 0usize;
     for track in &selected {
         let end = toc.end_lba(track.number).unwrap_or(toc.leadout_lba);
         let frames = track.frames(end);
+        // With looked-up metadata the track path comes from the naming
+        // template; without it the flat `trackNN` name is kept.
         let path = match &metadata {
             Some((disc, _)) => {
                 let position = track_position(&toc, track.number).unwrap_or(1);
-                track_path(
+                opts.template.track_path(
                     out_dir,
                     disc,
                     track.number,
@@ -483,6 +488,10 @@ fn rip_device(
             );
             failed += 1;
             continue;
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
 
         match rip_track(&mut dev, track, frames, &path, opts) {
