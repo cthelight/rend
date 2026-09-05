@@ -83,6 +83,7 @@ pub fn demo_meta() -> DiscMeta {
     DiscMeta {
         album: "Demo Album".into(),
         artist: "The Demo Band".into(),
+        album_artist: None,
         year: Some("2024".into()),
         release_id: "demo-release".into(),
         tracks: vec![

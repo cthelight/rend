@@ -50,9 +50,13 @@ pub struct DiscMeta {
     pub album: String,
     /// The release's artist.
     pub artist: String,
+    /// The album artist, when it differs from the release artist (e.g. a
+    /// compilation).
+    pub album_artist: Option<String>,
     /// Release year, if known.
     pub year: Option<String>,
-    /// MusicBrainz release id, for fetching cover art.
+    /// MusicBrainz release id, for fetching cover art. Empty for metadata
+    /// that was entered by hand instead of looked up.
     pub release_id: String,
     /// Per-track metadata, in disc order (audio tracks only).
     pub tracks: Vec<TrackMeta>,
@@ -294,6 +298,7 @@ fn to_disc_meta(release: &MbRelease, medium: Option<&MbMedium>) -> DiscMeta {
     DiscMeta {
         album: release.title.clone(),
         artist: release_artist,
+        album_artist: None,
         year: release.date.as_deref().and_then(year_of),
         release_id: release.id.clone(),
         tracks,

@@ -13,7 +13,7 @@ use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
 use rend_encode::{Format, ffmpeg_available};
-use rend_meta::{DiscMeta, DiscToc, cover_art, lookup_disc_all};
+use rend_meta::{DiscMeta, DiscToc, TrackMeta, cover_art, lookup_disc_all};
 
 use crate::demo::{
     DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta_all,
@@ -36,6 +36,7 @@ pub enum Hover {
     Track(usize),
     RipSelected,
     RipAll,
+    EditTags,
     Eject,
     Stop,
 }
@@ -47,6 +48,7 @@ pub struct Regions {
     pub tracks: Rect,
     pub rip_selected: Rect,
     pub rip_all: Rect,
+    pub edit_tags: Rect,
     pub eject: Rect,
     pub stop: Rect,
 }
@@ -262,6 +264,100 @@ fn drive_label(info: &DeviceInfo) -> String {
     label
 }
 
+/// One editable line of the metadata editor: a label, its value, and the
+/// cursor position as a byte offset into `value` (always a char boundary).
+#[derive(Debug, Clone)]
+pub struct EditField {
+    /// What the line edits, e.g. `album` or `03 artist`.
+    pub label: String,
+    /// The line's current text.
+    pub value: String,
+    /// Cursor position as a byte offset into `value`.
+    pub cursor: usize,
+}
+
+impl EditField {
+    fn new(label: String, value: String) -> Self {
+        Self {
+            label,
+            cursor: value.len(),
+            value,
+        }
+    }
+
+    /// Inserts a character at the cursor, moving the cursor past it.
+    fn insert(&mut self, c: char) {
+        self.value.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Deletes the character before the cursor, if any.
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = self.char_start_before(self.cursor);
+        self.value.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    /// Deletes the character at the cursor, if any.
+    fn delete(&mut self) {
+        if self.cursor >= self.value.len() {
+            return;
+        }
+        let end = self.char_end_at(self.cursor);
+        self.value.replace_range(self.cursor..end, "");
+    }
+
+    /// Moves the cursor left by one character.
+    fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = self.char_start_before(self.cursor);
+        }
+    }
+
+    /// Moves the cursor right by one character.
+    fn move_right(&mut self) {
+        if self.cursor < self.value.len() {
+            self.cursor = self.char_end_at(self.cursor);
+        }
+    }
+
+    /// The start of the character that ends at `pos`. `pos` must be a
+    /// nonzero char boundary.
+    fn char_start_before(&self, pos: usize) -> usize {
+        let mut i = pos - 1;
+        while i > 0 && !self.value.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// The end of the character that starts at `pos`. `pos` must be a char
+    /// boundary before the end of the value.
+    fn char_end_at(&self, pos: usize) -> usize {
+        let mut i = pos + 1;
+        while i < self.value.len() && !self.value.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    }
+}
+
+/// The open metadata editor: the fields being edited and which one has
+/// keyboard focus.
+#[derive(Debug, Clone)]
+pub struct MetaEdit {
+    /// The fields, in display order: album, artist, album artist, year,
+    /// then title and artist per track.
+    pub fields: Vec<EditField>,
+    /// The focused field.
+    pub sel: usize,
+    /// The first displayed field.
+    pub scroll: usize,
+}
+
 /// The outcome of a background metadata lookup. `id` records which lookup
 /// produced it, so results from a previous disc can be discarded.
 enum MetaEvent {
@@ -308,6 +404,8 @@ pub struct App {
     meta_sel: usize,
     /// The selected candidate's cover art, once fetched.
     cover: Option<Vec<u8>>,
+    /// The open metadata editor, if one is being edited.
+    pub editing: Option<MetaEdit>,
     /// Pending results from the metadata lookup workers.
     meta_rx: Option<mpsc::Receiver<MetaEvent>>,
     /// The sender of the metadata lookup channel, for the cover worker.
@@ -348,6 +446,7 @@ impl App {
             meta: None,
             meta_sel: 0,
             cover: None,
+            editing: None,
             meta_rx: None,
             meta_tx: None,
             meta_gen: 0,
@@ -411,6 +510,7 @@ impl App {
         self.meta = None;
         self.meta_sel = 0;
         self.cover = None;
+        self.editing = None;
         match self.drives[idx].toc() {
             Ok(toc) => {
                 self.disc_id = self.drives[idx].mcn();
@@ -535,12 +635,25 @@ impl App {
             .as_deref()
             .map(|y| format!(" ({y})"))
             .unwrap_or_default();
-        let prefix = if candidates.len() > 1 {
+        let mut prefix = if candidates.len() > 1 {
             format!("match {} of {} · ", self.meta_sel + 1, candidates.len())
         } else {
             String::new()
         };
-        Some(format!("{prefix}{} — {}{year}", disc.artist, disc.album))
+        if disc.release_id.is_empty() {
+            prefix.push_str("manual · ");
+        }
+        let album = if disc.album.is_empty() {
+            "untitled"
+        } else {
+            disc.album.as_str()
+        };
+        let artist = if disc.artist.is_empty() {
+            "unknown artist"
+        } else {
+            disc.artist.as_str()
+        };
+        Some(format!("{prefix}{artist} — {album}{year}"))
     }
 
     /// Switches to the next candidate match, wrapping around.
@@ -560,11 +673,16 @@ impl App {
     }
 
     /// Starts fetching the selected candidate's cover art: built in for the
-    /// simulated disc, on a background thread for a real one.
+    /// simulated disc, on a background thread for a real one. Hand-entered
+    /// metadata has no release to fetch a cover for.
     fn fetch_cover(&mut self) {
         let Some(disc) = self.selected_meta().cloned() else {
             return;
         };
+        if disc.release_id.is_empty() {
+            self.cover = None;
+            return;
+        }
         if self.drives.get(self.drive_sel).is_some_and(Drive::is_demo) {
             self.cover = Some(demo_cover());
             return;
@@ -590,8 +708,13 @@ impl App {
             .ok();
     }
 
-    /// Handles a key press.
+    /// Handles a key press. While the metadata editor is open, every key
+    /// goes to it instead.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.editing.is_some() {
+            self.edit_key(key);
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if key.code == KeyCode::Char('c') {
                 self.running = false;
@@ -626,14 +749,180 @@ impl App {
             KeyCode::Char('r') => self.rip_selected_track(),
             KeyCode::Char('a') => self.rip_all_audio(),
             KeyCode::Char('m') => self.next_match(),
+            KeyCode::Char('t') => self.start_editing(),
             KeyCode::Char('e') => self.eject(),
             KeyCode::Char('s') => self.stop_rip(),
             _ => {}
         }
     }
 
-    /// Handles a mouse event (click, double-click, move, scroll).
+    /// Opens the metadata editor on the selected candidate. When the lookup
+    /// found no candidates, a blank entry is created so the disc can still
+    /// be tagged by hand.
+    pub fn start_editing(&mut self) {
+        if self.toc.is_none() {
+            self.status = Some("no disc loaded".into());
+            return;
+        }
+        if self.drive_ripping(self.drive_sel) {
+            self.status = Some("stop the rip before editing tags".into());
+            return;
+        }
+        if self.selected_meta().is_none() {
+            self.create_manual_meta();
+        }
+        let Some(disc) = self.selected_meta().cloned() else {
+            return;
+        };
+        let mut fields = vec![
+            EditField::new("album".into(), disc.album.clone()),
+            EditField::new("artist".into(), disc.artist.clone()),
+            EditField::new(
+                "album artist".into(),
+                disc.album_artist.clone().unwrap_or_default(),
+            ),
+            EditField::new("year".into(), disc.year.clone().unwrap_or_default()),
+        ];
+        for (i, track) in disc.tracks.iter().enumerate() {
+            fields.push(EditField::new(
+                format!("{:02} title", i + 1),
+                track.title.clone(),
+            ));
+            fields.push(EditField::new(
+                format!("{:02} artist", i + 1),
+                track.artist.clone().unwrap_or_default(),
+            ));
+        }
+        self.editing = Some(MetaEdit {
+            fields,
+            sel: 0,
+            scroll: 0,
+        });
+        self.status = None;
+    }
+
+    /// Appends a blank, hand-entered entry for a disc the lookup could not
+    /// match, and selects it. An in-flight lookup is cancelled: the manual
+    /// entry takes precedence.
+    fn create_manual_meta(&mut self) {
+        let Some(toc) = self.toc.as_ref() else {
+            self.status = Some("no disc loaded".into());
+            return;
+        };
+        let tracks = toc
+            .audio_tracks()
+            .map(|t| TrackMeta {
+                title: format!("Track {}", t.number),
+                artist: None,
+            })
+            .collect();
+        self.meta_gen += 1;
+        self.meta_rx = None;
+        self.meta_tx = None;
+        self.cover = None;
+        self.meta = Some(vec![DiscMeta {
+            album: String::new(),
+            artist: String::new(),
+            album_artist: None,
+            year: None,
+            release_id: String::new(),
+            tracks,
+        }]);
+        self.meta_sel = 0;
+        self.status = Some("no match found — enter the tags by hand".into());
+    }
+
+    /// Applies the editor's values to the selected candidate and closes it.
+    pub fn save_editing(&mut self) {
+        let Some(edit) = self.editing.take() else {
+            return;
+        };
+        let Some(disc) = self.meta.as_mut().and_then(|m| m.get_mut(self.meta_sel)) else {
+            return;
+        };
+        let field = |i: usize| edit.fields.get(i).map(|f| f.value.trim().to_string());
+        if let Some(album) = field(0) {
+            disc.album = album;
+        }
+        if let Some(artist) = field(1) {
+            disc.artist = artist;
+        }
+        if let Some(album_artist) = field(2) {
+            disc.album_artist = (!album_artist.is_empty()).then_some(album_artist);
+        }
+        if let Some(year) = field(3) {
+            disc.year = (!year.is_empty()).then_some(year);
+        }
+        for (i, track) in disc.tracks.iter_mut().enumerate() {
+            if let Some(title) = field(4 + 2 * i) {
+                track.title = title;
+            }
+            if let Some(artist) = field(5 + 2 * i) {
+                track.artist = (!artist.is_empty()).then_some(artist);
+            }
+        }
+        self.status = Some(self.match_status().unwrap_or_default());
+    }
+
+    /// Closes the editor without saving.
+    pub fn cancel_editing(&mut self) {
+        if self.editing.take().is_some() {
+            self.status = Some("tag editing cancelled".into());
+        }
+    }
+
+    /// Routes a key press to the open metadata editor.
+    fn edit_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.code == KeyCode::Char('c') {
+                self.cancel_editing();
+            }
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.cancel_editing(),
+            KeyCode::Enter => self.save_editing(),
+            _ => self.edit_field_key(key),
+        }
+    }
+
+    /// Edits the focused field, or moves the focus between fields.
+    fn edit_field_key(&mut self, key: KeyEvent) {
+        let Some(edit) = self.editing.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Tab => edit.sel = edit.sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::BackTab => {
+                edit.sel = (edit.sel + 1).min(edit.fields.len().saturating_sub(1))
+            }
+            _ => {
+                let Some(field) = edit.fields.get_mut(edit.sel) else {
+                    return;
+                };
+                match key.code {
+                    KeyCode::Backspace => field.backspace(),
+                    KeyCode::Delete => field.delete(),
+                    KeyCode::Left => field.move_left(),
+                    KeyCode::Right => field.move_right(),
+                    KeyCode::Home => field.cursor = 0,
+                    KeyCode::End => field.cursor = field.value.len(),
+                    KeyCode::Char(c) => field.insert(c),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Handles a mouse event (click, double-click, move, scroll). While the
+    /// metadata editor is open, mouse input is ignored.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.editing.is_some() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let hover = self.hover_at(mouse);
@@ -653,6 +942,7 @@ impl App {
                     }
                     Hover::RipSelected => self.rip_selected_track(),
                     Hover::RipAll => self.rip_all_audio(),
+                    Hover::EditTags => self.start_editing(),
                     Hover::Eject => self.eject(),
                     Hover::Stop => self.stop_rip(),
                     Hover::None => {}
@@ -811,6 +1101,7 @@ impl App {
             self.meta = None;
             self.meta_sel = 0;
             self.cover = None;
+            self.editing = None;
             self.meta_rx = None;
             self.meta_tx = None;
             self.meta_gen += 1;
@@ -931,6 +1222,7 @@ impl App {
                 self.meta = None;
                 self.meta_sel = 0;
                 self.cover = None;
+                self.editing = None;
                 self.meta_rx = None;
                 self.meta_tx = None;
                 self.meta_gen += 1;
@@ -1055,6 +1347,9 @@ impl App {
         }
         if self.regions.rip_all.contains(pos) {
             return Hover::RipAll;
+        }
+        if self.regions.edit_tags.contains(pos) {
+            return Hover::EditTags;
         }
         if self.regions.eject.contains(pos) {
             return Hover::Eject;
@@ -1319,6 +1614,252 @@ mod tests {
         let mut app = demo_app(dir.path());
         app.handle_key(key('q'));
         assert!(!app.running);
+    }
+
+    fn key_event(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(c));
+        }
+    }
+
+    /// Moves the editor focus down by one field.
+    fn field_down(app: &mut App) {
+        app.handle_key(key_event(KeyCode::Down));
+    }
+
+    /// Clears the focused field by backspacing out its current contents.
+    fn clear_field(app: &mut App) {
+        let len = app
+            .editing
+            .as_ref()
+            .and_then(|e| e.fields.get(e.sel))
+            .map_or(0, |f| f.value.chars().count());
+        for _ in 0..len {
+            app.handle_key(key_event(KeyCode::Backspace));
+        }
+    }
+
+    #[test]
+    fn edits_metadata_with_t() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.handle_key(key('t'));
+        assert!(app.editing.is_some());
+        assert_eq!(app.editing.as_ref().unwrap().fields[0].label, "album");
+
+        // The album field is focused; append to it, then move to the track 3
+        // title (fields: album, artist, album artist, year, then two per track)
+        // and append there too.
+        type_text(&mut app, " (Deluxe)");
+        for _ in 0..8 {
+            field_down(&mut app);
+        }
+        type_text(&mut app, " (Edit)");
+        app.handle_key(key_event(KeyCode::Enter));
+
+        assert!(app.editing.is_none());
+        let disc = app.selected_meta().unwrap();
+        assert_eq!(disc.album, "Demo Album (Deluxe)");
+        assert_eq!(disc.tracks[2].title, "Short One (Edit)");
+        // The renamed album shows up in the candidate summary.
+        assert!(app.match_status().unwrap().contains("Demo Album (Deluxe)"));
+    }
+
+    #[test]
+    fn esc_cancels_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let album_before = app.selected_meta().unwrap().album.clone();
+
+        app.handle_key(key('t'));
+        type_text(&mut app, "junk");
+        app.handle_key(key_event(KeyCode::Esc));
+
+        assert!(app.editing.is_none());
+        assert!(app.running, "esc inside the editor must not quit");
+        assert_eq!(app.selected_meta().unwrap().album, album_before);
+    }
+
+    #[test]
+    fn ctrl_c_cancels_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.handle_key(key('t'));
+        type_text(&mut app, "junk");
+        app.handle_key(ctrl_c());
+
+        assert!(app.editing.is_none());
+        assert!(app.running, "ctrl-c inside the editor must not quit");
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album");
+    }
+
+    #[test]
+    fn editor_keys_are_text_not_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.handle_key(key('t'));
+        // q would quit, m would switch matches; inside the editor they type.
+        app.handle_key(key('q'));
+        app.handle_key(key('m'));
+        assert!(app.running);
+        assert!(app.editing.is_some());
+        assert_eq!(
+            app.editing.as_ref().unwrap().fields[0].value,
+            "Demo Albumqm"
+        );
+        app.handle_key(key_event(KeyCode::Esc));
+        // The typed text was not applied.
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album");
+    }
+
+    #[test]
+    fn unmatched_disc_gets_manual_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.meta = None; // Simulate a lookup that found nothing.
+
+        app.handle_key(key('t'));
+        assert!(app.editing.is_some());
+        let disc = app.selected_meta().unwrap();
+        assert_eq!(disc.release_id, "");
+        assert_eq!(disc.tracks.len(), 5);
+        assert_eq!(disc.tracks[0].title, "Track 1");
+        assert!(app.cover.is_none());
+
+        // Fill in album and artist, then save.
+        type_text(&mut app, "My Album");
+        field_down(&mut app);
+        type_text(&mut app, "My Artist");
+        app.handle_key(key_event(KeyCode::Enter));
+
+        let disc = app.selected_meta().unwrap();
+        assert_eq!(disc.album, "My Album");
+        assert_eq!(disc.artist, "My Artist");
+        assert!(app.match_status().unwrap().starts_with("manual · "));
+    }
+
+    #[test]
+    fn manual_meta_is_saved_and_rippable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.meta = None;
+        app.handle_key(key('t'));
+        type_text(&mut app, "My Album");
+        field_down(&mut app);
+        type_text(&mut app, "My Artist");
+        app.handle_key(key_event(KeyCode::Enter));
+
+        app.track_sel = 2;
+        app.rip_selected_track();
+        drain_until_finished(&mut app, Duration::from_secs(10));
+
+        // The rip is named after the hand-entered artist and the default
+        // track title: <out>/My Artist/03 Track 3.flac.
+        let flac = dir.path().join("My Artist/03 Track 3.flac");
+        assert!(flac.exists());
+        let file = lofty::read_from_path(&flac).unwrap();
+        let tag = file.tag(lofty::tag::TagType::VorbisComments).unwrap();
+        assert_eq!(
+            tag.album().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("My Album")
+        );
+        assert_eq!(
+            tag.artist().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("My Artist")
+        );
+    }
+
+    #[test]
+    fn rip_uses_edited_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.handle_key(key('t'));
+        clear_field(&mut app);
+        type_text(&mut app, "Renamed Album");
+        for _ in 0..8 {
+            field_down(&mut app);
+        }
+        type_text(&mut app, " (Edit)");
+        app.handle_key(key_event(KeyCode::Enter));
+
+        app.track_sel = 2;
+        app.rip_selected_track();
+        drain_until_finished(&mut app, Duration::from_secs(10));
+
+        let flac = dir.path().join("The Demo Band/03 Short One (Edit).flac");
+        assert!(flac.exists());
+        let file = lofty::read_from_path(&flac).unwrap();
+        let tag = file.tag(lofty::tag::TagType::VorbisComments).unwrap();
+        assert_eq!(
+            tag.album().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Renamed Album")
+        );
+        assert_eq!(
+            tag.title().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Short One (Edit)")
+        );
+    }
+
+    #[test]
+    fn editor_backspace_removes_whole_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.handle_key(key('t'));
+        clear_field(&mut app);
+        type_text(&mut app, "café");
+        // The cursor sits after the two-byte 'é'; one backspace removes it
+        // whole, not half of it.
+        app.handle_key(key_event(KeyCode::Backspace));
+
+        assert_eq!(app.editing.as_ref().unwrap().fields[0].value, "caf");
+        app.handle_key(key_event(KeyCode::Esc));
+    }
+
+    #[test]
+    fn editing_is_refused_while_ripping() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.track_sel = 2;
+        app.rip_selected_track();
+        app.handle_key(key('t'));
+        assert!(app.editing.is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("stop the rip"))
+        );
+
+        app.stop_rip();
+        drain_until_finished(&mut app, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn mouse_is_ignored_while_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        with_tracks_rect(&mut app);
+
+        app.handle_key(key('t'));
+        // Track 2's row; a click would normally select it.
+        app.handle_mouse(click(10, 6));
+
+        assert_eq!(app.track_sel, 0);
+        assert!(app.editing.is_some());
+        app.handle_key(key_event(KeyCode::Esc));
     }
 
     #[test]

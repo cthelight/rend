@@ -112,6 +112,7 @@ Keyboard:
 | `m`              | switch to the next candidate match |
 | `r`              | rip the selected track          |
 | `a`              | rip all audio tracks            |
+| `t`              | edit the disc's tags            |
 | `e`              | eject the disc                  |
 | `f`              | toggle force (overwrite)        |
 | `o`              | toggle output format (flac/wav) |
@@ -129,6 +130,13 @@ switches to the next one, re-fetching its cover art; rips are tagged with
 whichever match is selected. Ripped tracks carry the looked-up metadata
 and cover art, embedded the same way as in the CLI (best effort — a
 failed lookup never blocks a rip).
+
+`t` opens a tags editor for the selected match: album, artist, album
+artist, year, and a title and artist per track. `enter` saves, `esc`
+(or `ctrl-c`) cancels, `↑`/`↓` and `tab`/`shift+tab` move between fields.
+If the lookup found no candidates, `t` still opens the editor on a blank
+"manual" entry (marked `manual ·` in the header), so an unmatched disc
+can be tagged by hand; rips of it use those tags.
 
 When more than one drive is present, several can rip at the same time:
 each drive keeps its own rip state, so you can start a rip on one drive

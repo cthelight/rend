@@ -674,6 +674,7 @@ mod tests {
         let one = DiscMeta {
             album: "A".into(),
             artist: "B".into(),
+            album_artist: None,
             year: None,
             release_id: "r1".into(),
             tracks: vec![],
@@ -681,6 +682,7 @@ mod tests {
         let two = DiscMeta {
             album: "C".into(),
             artist: "B".into(),
+            album_artist: None,
             year: None,
             release_id: "r2".into(),
             tracks: vec![],

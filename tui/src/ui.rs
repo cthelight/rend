@@ -1,4 +1,5 @@
-//! Rendering: drives, table of contents, rip progress, and the status bar.
+//! Rendering: drives, table of contents, rip progress, tags editor, and the
+//! status bar.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -6,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Gauge, List, ListItem, Paragraph, Row, Table};
 
-use crate::app::{App, Focus, Hover, Regions, TrackState};
+use crate::app::{App, EditField, Focus, Hover, MetaEdit, Regions, TrackState};
 
 /// Draws the whole screen and updates the mouse hit-test regions.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -26,6 +27,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_rip(f, app, chunks[2], &mut regions);
     draw_status(f, app, chunks[3]);
     app.regions = regions;
+    let summary = app.match_status();
+    if let Some(edit) = app.editing.as_mut() {
+        draw_meta_edit(f, summary.as_deref().unwrap_or(""), edit);
+    }
 }
 
 fn panel_block(title: String, focused: bool) -> Block<'static> {
@@ -277,6 +282,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     let btns = Layout::horizontal([
         Constraint::Length(18),
         Constraint::Length(14),
+        Constraint::Length(10),
         Constraint::Length(12),
         Constraint::Length(12),
     ])
@@ -301,15 +307,23 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     draw_button(
         f,
         btns[2],
+        "[t] tags",
+        can_rip,
+        app.hover == Hover::EditTags,
+    );
+    draw_button(
+        f,
+        btns[3],
         "[e] eject",
         can_eject,
         app.hover == Hover::Eject,
     );
-    draw_button(f, btns[3], "[s] stop", active, app.hover == Hover::Stop);
+    draw_button(f, btns[4], "[s] stop", active, app.hover == Hover::Stop);
     regions.rip_selected = btns[0];
     regions.rip_all = btns[1];
-    regions.eject = btns[2];
-    regions.stop = btns[3];
+    regions.edit_tags = btns[2];
+    regions.eject = btns[3];
+    regions.stop = btns[4];
 }
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
@@ -324,7 +338,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
             Color::Gray,
         ),
         None => (
-            " [↑↓] move · [tab] focus · [enter] activate · [m] match · [r] rip · [a] all · [e] eject · [o] format · [f] force · [q] quit "
+            " [↑↓] move · [tab] focus · [enter] activate · [m] match · [r] rip · [a] all · [t] tags · [e] eject · [o] format · [f] force · [q] quit "
                 .to_string(),
             Color::Gray,
         ),
@@ -358,6 +372,68 @@ fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: b
         Paragraph::new(Line::from(Span::styled(format!(" {label} "), style))),
         rect,
     );
+}
+
+/// The centered modal for editing the disc's tags.
+fn draw_meta_edit(f: &mut Frame, summary: &str, edit: &mut MetaEdit) {
+    let area = f.area();
+    let width = 54u16.min(area.width.saturating_sub(2));
+    let height = 14u16.min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let block = Block::bordered()
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Edit tags ");
+    f.render_widget(Paragraph::new("").block(block), rect);
+    let inner = rect.inner(Margin::new(1, 1));
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(summary.to_string()).style(Style::default().fg(Color::DarkGray)),
+        rows[0],
+    );
+
+    let visible = rows[1].height as usize;
+    let start = clamp_scroll(edit.scroll, edit.sel, edit.fields.len(), visible);
+    edit.scroll = start;
+    let lines: Vec<Line> = edit
+        .fields
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(i, field)| field_line(field, i == edit.sel))
+        .collect();
+    f.render_widget(Paragraph::new(lines), rows[1]);
+
+    f.render_widget(
+        Paragraph::new(" enter save · esc cancel · ↑↓/tab fields · ctrl-c cancel ")
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
+    );
+}
+
+/// One editor line: the label, the value, and the cursor as a reversed bar.
+fn field_line(field: &EditField, selected: bool) -> Line<'_> {
+    let before = &field.value[..field.cursor];
+    let after = &field.value[field.cursor..];
+    let text = format!("{before}▏{after}");
+    let label = format!("{:<12} ", field.label);
+    let value = if selected {
+        Span::styled(text, Style::default().add_modifier(Modifier::REVERSED))
+    } else {
+        Span::raw(text)
+    };
+    Line::from(vec![Span::raw(label), value])
 }
 
 fn current_track(rip: Option<&crate::app::RipState>, app: &App) -> Option<u8> {
@@ -453,7 +529,43 @@ pub fn fmt_eta(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use rend_core::TrackType;
+    use rend_encode::Format;
+
+    /// Renders the app once and returns the whole screen as one string.
+    fn rendered(app: &mut App) -> String {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn draws_the_tags_editor_modal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(None, dir.path().to_path_buf(), false, Format::Flac, true);
+
+        // Without the editor, no modal is drawn.
+        let plain = rendered(&mut app);
+        assert!(!plain.contains("Edit tags"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let with_editor = rendered(&mut app);
+        assert!(with_editor.contains("Edit tags"));
+        // The summary line and the focused field are visible.
+        assert!(with_editor.contains("The Demo Band"));
+        assert!(with_editor.contains("Demo Album"));
+        assert!(with_editor.contains("enter save"));
+    }
 
     #[test]
     fn bytes() {

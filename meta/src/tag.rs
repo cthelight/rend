@@ -38,14 +38,22 @@ impl TrackTags {
     /// The tags for the track at the given 1-based position of a looked-up
     /// disc; `total` is the number of audio tracks on the disc.
     ///
+    /// The track artist falls back to the release artist, and the album
+    /// artist to the release artist as well.
+    ///
     /// Returns `None` when the lookup knows nothing about that position.
     pub fn for_track(disc: &DiscMeta, position: usize, total: usize) -> Option<Self> {
         let track = disc.track(position)?;
+        let release_artist = (!disc.artist.is_empty()).then(|| disc.artist.clone());
         Some(Self {
             title: track.title.clone(),
             artist: track.artist.clone().unwrap_or_else(|| disc.artist.clone()),
             album: disc.album.clone(),
-            album_artist: (!disc.artist.is_empty()).then(|| disc.artist.clone()),
+            album_artist: disc
+                .album_artist
+                .clone()
+                .filter(|a| !a.is_empty())
+                .or(release_artist),
             track_number: position as u32,
             track_count: (total > 1).then_some(total as u32),
             year: disc.year.clone(),
@@ -154,6 +162,7 @@ mod tests {
         DiscMeta {
             album: "The Album".into(),
             artist: "The Band".into(),
+            album_artist: None,
             year: Some("1997".into()),
             release_id: "rel-1".into(),
             tracks: vec![
@@ -188,6 +197,16 @@ mod tests {
         // Unknown positions yield no tags at all.
         assert_eq!(TrackTags::for_track(&disc, 3, 2), None);
         assert_eq!(TrackTags::for_track(&disc, 0, 2), None);
+    }
+
+    #[test]
+    fn an_explicit_album_artist_wins_over_the_fallback() {
+        let mut disc = disc_meta();
+        disc.album_artist = Some("Various Artists".into());
+        let tags = TrackTags::for_track(&disc, 1, 2).unwrap();
+        assert_eq!(tags.album_artist.as_deref(), Some("Various Artists"));
+        // The track artist still falls back to the release artist.
+        assert_eq!(tags.artist, "The Band");
     }
 
     #[test]

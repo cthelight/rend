@@ -91,6 +91,7 @@ mod tests {
         DiscMeta {
             album: "The Album".into(),
             artist: "The Band".into(),
+            album_artist: None,
             year: None,
             release_id: "rel".into(),
             tracks: vec![TrackMeta {
