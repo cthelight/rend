@@ -51,6 +51,15 @@ impl TrackType {
     }
 }
 
+impl std::fmt::Display for TrackType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Audio => "audio",
+            Self::Data => "data",
+        })
+    }
+}
+
 /// The table of contents of a CD.
 #[derive(Debug, Clone, Default)]
 pub struct Toc {
