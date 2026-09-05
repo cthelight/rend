@@ -1,32 +1,41 @@
-//! Rendering: drives, table of contents, rip progress, tags editor, and the
-//! status bar.
+//! Rendering: the drives panel, table of contents, rip progress, the
+//! keybinds help window, the tags editor, and the status bar.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
 
-use crate::app::{App, EditField, Focus, Hover, MetaEdit, Regions, TrackState};
+use crate::app::{App, Drive, EditField, Focus, Hover, MetaEdit, Regions, TrackState};
+
+/// The width of the vertical drives panel on the left.
+const DRIVES_WIDTH: u16 = 40;
+/// The lines a drives panel entry occupies: the name, then the album.
+const DRIVE_ENTRY_LINES: u16 = 2;
 
 /// Draws the whole screen and updates the mouse hit-test regions.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let drives_height = 2 + app.drives.len().min(8) as u16;
     let chunks = Layout::vertical([
-        Constraint::Length(drives_height),
         Constraint::Min(4),
         Constraint::Length(6),
         Constraint::Length(1),
     ])
     .split(area);
+    // Drives on the left, the selected disc's TOC and metadata on the right.
+    let main = Layout::horizontal([Constraint::Length(DRIVES_WIDTH), Constraint::Min(10)])
+        .split(chunks[0]);
 
     let mut regions = Regions::default();
-    draw_drives(f, app, chunks[0], &mut regions);
-    draw_toc(f, app, chunks[1], &mut regions);
-    draw_rip(f, app, chunks[2], &mut regions);
-    draw_status(f, app, chunks[3]);
+    draw_drives(f, app, main[0], &mut regions);
+    draw_toc(f, app, main[1], &mut regions);
+    draw_rip(f, app, chunks[1], &mut regions);
+    draw_status(f, app, chunks[2]);
     app.regions = regions;
+    if app.help {
+        draw_help(f);
+    }
     let summary = app.match_status();
     if let Some(edit) = app.editing.as_mut() {
         draw_meta_edit(f, summary.as_deref().unwrap_or(""), edit);
@@ -56,42 +65,103 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
         return;
     }
 
-    let visible = app.visible(area);
+    f.render_widget(Paragraph::new("").block(block), area);
+    let inner = area.inner(Margin::new(1, 1));
+    let visible = (inner.height as usize) / DRIVE_ENTRY_LINES as usize;
     let start = clamp_scroll(app.drives_scroll, app.drive_sel, app.drives.len(), visible);
     app.drives_scroll = start;
 
-    let items: Vec<ListItem> = app
+    for (row, (i, d)) in app
         .drives
         .iter()
         .enumerate()
         .skip(start)
         .take(visible)
-        .map(|(i, d)| {
-            let (style, marker) = if i == app.drive_sel {
-                (Style::default().add_modifier(Modifier::REVERSED), "●")
-            } else if app.hover == Hover::Drive(i) {
-                (Style::default().add_modifier(Modifier::BOLD), "○")
+        .enumerate()
+    {
+        let top = inner.y + row as u16 * DRIVE_ENTRY_LINES;
+        let name = Rect::new(inner.x, top, inner.width, 1);
+        let info = Rect::new(inner.x, top + 1, inner.width, 1);
+        let selected = i == app.drive_sel;
+        let hovered = app.hover == Hover::Drive(i);
+        let label = drive_name(d, selected, hovered, inner.width as usize);
+
+        if app.drive_ripping(i) {
+            // A rip in progress turns the drive's name line into the rip's
+            // progress bar, keeping the name visible on top of it.
+            let (done, total) = app.rip_progress(i);
+            let ratio = if total > 0 {
+                (done as f64 / total as f64).clamp(0.0, 1.0)
             } else {
-                (Style::default(), "○")
+                0.0
             };
-            let rip = if app.drive_ripping(i) {
-                Span::styled("  ▶", Style::default().fg(Color::Yellow))
+            f.render_widget(
+                Paragraph::new(rip_name_line(d, selected, ratio, inner.width as usize)),
+                name,
+            );
+        } else {
+            let style = if selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if hovered {
+                Style::default().add_modifier(Modifier::BOLD)
             } else {
-                Span::raw("")
+                Style::default()
             };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!(" {marker} {:<14} {:<34.34} ", d.path, d.label)),
-                Span::styled(
-                    d.status.clone(),
-                    Style::default().fg(status_color(&d.status)),
-                ),
-                rip,
-            ]))
-            .style(style)
+            f.render_widget(Paragraph::new(label).style(style), name);
+        }
+
+        // Under the name: the disc's album once matched, else the drive's
+        // status.
+        let (text, color) = match &d.album {
+            Some(album) => (format!(" {album}"), Color::Gray),
+            None => (format!(" {}", d.status), status_color(&d.status)),
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color)))),
+            info,
+        );
+    }
+}
+
+/// The drive's name line: the selection marker, its path, and its label,
+/// padded to the full width so a selected (reversed) entry spans the row.
+fn drive_name(d: &Drive, selected: bool, hovered: bool, width: usize) -> String {
+    let marker = if selected { "●" } else { "○" };
+    let name = format!("{marker} {} {}", d.path, d.label);
+    let name: String = name.chars().take(width).collect();
+    let pad = width.saturating_sub(name.chars().count());
+    if pad > 0 && (selected || hovered) {
+        format!("{name}{}", " ".repeat(pad))
+    } else {
+        name
+    }
+}
+
+/// The drive's name line while its rip is running: the name, centered, over
+/// a hand-drawn progress bar so the drive stays identifiable.
+fn rip_name_line(d: &Drive, selected: bool, ratio: f64, width: usize) -> Line<'static> {
+    let marker = if selected { "●" } else { "○" };
+    let name: String = format!("{marker} {} {}", d.path, d.label)
+        .chars()
+        .take(width)
+        .collect();
+    let bar = if selected { Color::Cyan } else { Color::Gray };
+    let filled = (ratio.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let start = (width.saturating_sub(name.chars().count())) / 2;
+    let mut cells = vec![None; width];
+    for (i, ch) in name.chars().enumerate() {
+        cells[start + i] = Some(ch);
+    }
+    let spans: Vec<Span> = cells
+        .iter()
+        .enumerate()
+        .map(|(x, ch)| match ch {
+            Some(ch) => Span::raw(ch.to_string()),
+            None if x < filled => Span::styled("█", Style::default().fg(bar)),
+            None => Span::styled("░", Style::default().fg(Color::DarkGray)),
         })
         .collect();
-
-    f.render_widget(List::new(items).block(block), area);
+    Line::from(spans)
 }
 
 fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
@@ -182,15 +252,17 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         })
         .collect();
 
+    // The panel now shares the width with the drives panel, so the title
+    // takes the slack and the rip state column stays readable.
     let table = Table::new(
         rows,
         [
             Constraint::Length(4),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(24),
-            Constraint::Min(10),
+            Constraint::Length(7),
+            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Min(8),
+            Constraint::Length(18),
         ],
     )
     .header(header)
@@ -331,17 +403,12 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         Some(d) => format!(" {} · {} ", d.path, d.status),
         None => " no drives ".to_string(),
     };
+    // The keybind hints live in the help window now (`?`); the right side
+    // carries the current status message, or a nudge to the help window.
     let (right, color) = match &app.status {
         Some(status) => (format!(" {status} "), Color::Yellow),
-        None if app.drive_ripping(app.drive_sel) => (
-            " [s] stop   [o] format   [f] force   [q] quit ".to_string(),
-            Color::Gray,
-        ),
-        None => (
-            " [↑↓] move · [tab] focus · [enter] activate · [m] match · [r] rip · [a] all · [t] tags · [e] eject · [o] format · [f] force · [q] quit "
-                .to_string(),
-            Color::Gray,
-        ),
+        None if app.drive_ripping(app.drive_sel) => (String::new(), Color::Gray),
+        None => (" ? for keybinds ".to_string(), Color::DarkGray),
     };
 
     let width = area.width as usize;
@@ -355,6 +422,59 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(right, Style::default().fg(color)),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// The keybinds reference, opened and closed with `?`.
+fn draw_help(f: &mut Frame) {
+    let area = f.area();
+    let width = 54u16.min(area.width.saturating_sub(2));
+    let height = 17u16.min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let block = Block::bordered()
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Keybinds · press ? or esc to close ");
+    f.render_widget(Paragraph::new("").block(block), rect);
+
+    let rows = [
+        ("↑/↓  j/k", "move selection"),
+        ("tab", "switch panel focus"),
+        ("enter", "load disc / rip selected track"),
+        ("r", "rip the selected track"),
+        ("a", "rip all audio tracks"),
+        ("m", "switch metadata match"),
+        ("t", "edit the disc's tags"),
+        ("e", "eject the disc"),
+        ("o", "cycle the output format"),
+        ("f", "toggle force (overwrite)"),
+        ("s", "stop the selected rip"),
+        ("?", "show or close this help"),
+        ("q  esc", "quit"),
+    ];
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(key, what)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{key:<10}"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {what}")),
+            ])
+        })
+        .chain(std::iter::once(Line::from(Span::raw(""))))
+        .chain(std::iter::once(Line::from(Span::styled(
+            "mouse: click selects · double-click rips · wheel scrolls",
+            Style::default().fg(Color::DarkGray),
+        ))))
+        .collect();
+    f.render_widget(Paragraph::new(lines), rect.inner(Margin::new(1, 1)));
 }
 
 fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: bool) {
@@ -550,6 +670,37 @@ mod tests {
             .collect()
     }
 
+    /// Renders the app once and returns the screen row by row.
+    fn rendered_lines(app: &mut App) -> Vec<String> {
+        let width = 100usize;
+        let height = 30usize;
+        let backend = TestBackend::new(width as u16, height as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let cells = terminal.backend().buffer().content();
+        (0..height)
+            .map(|y| {
+                cells[y * width..(y + 1) * width]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect()
+    }
+
+    /// A demo-mode app with a simulated disc loaded.
+    fn demo_app(dir: &std::path::Path) -> App {
+        App::new(
+            None,
+            dir.to_path_buf(),
+            false,
+            Format::Flac,
+            Template::default(),
+            true,
+        )
+    }
+
     #[test]
     fn draws_the_tags_editor_modal() {
         let dir = tempfile::tempdir().unwrap();
@@ -573,6 +724,101 @@ mod tests {
         assert!(with_editor.contains("The Demo Band"));
         assert!(with_editor.contains("Demo Album"));
         assert!(with_editor.contains("enter save"));
+    }
+
+    #[test]
+    fn drives_panel_shows_the_album_below_the_drive_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        let lines = rendered_lines(&mut app);
+        // The drive's name line, in the left panel only.
+        let name_row = (0..30)
+            .find(|y| {
+                lines[*y]
+                    .chars()
+                    .take(DRIVES_WIDTH as usize)
+                    .collect::<String>()
+                    .contains("/dev/sr-demo")
+            })
+            .expect("the drive name line");
+        // The album sits directly under the name.
+        let album_row: String = lines[name_row + 1]
+            .chars()
+            .take(DRIVES_WIDTH as usize)
+            .collect();
+        assert!(
+            album_row.contains("The Demo Band — Demo Album (2024)"),
+            "unexpected album line: {album_row:?}"
+        );
+    }
+
+    #[test]
+    fn help_window_lists_the_keybinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        let plain = rendered(&mut app);
+        assert!(!plain.contains("Keybinds"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let with_help = rendered(&mut app);
+        assert!(with_help.contains("Keybinds"));
+        assert!(with_help.contains("rip all audio tracks"));
+        assert!(with_help.contains("double-click rips"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let closed = rendered(&mut app);
+        assert!(!closed.contains("Keybinds"));
+        assert!(app.running);
+    }
+
+    #[test]
+    fn a_ripping_drive_turns_its_name_into_a_progress_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.track_sel = 2;
+        app.rip_selected_track();
+        assert!(app.drive_ripping(app.drive_sel));
+        // A short label leaves room for the bar around the name.
+        app.drives[0].label = "CD".into();
+
+        let lines = rendered_lines(&mut app);
+        let name_row = (0..30)
+            .find(|y| {
+                lines[*y]
+                    .chars()
+                    .take(DRIVES_WIDTH as usize)
+                    .collect::<String>()
+                    .contains("/dev/sr-demo")
+            })
+            .expect("the drive name line");
+        let line: String = lines[name_row]
+            .chars()
+            .take(DRIVES_WIDTH as usize)
+            .collect();
+        // The name is still visible, over a hand-drawn progress bar.
+        assert!(line.contains("/dev/sr-demo"));
+        assert!(
+            line.contains('█') || line.contains('░'),
+            "no bar in: {line:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hints_point_at_the_help_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        app.status = None;
+        let plain = rendered(&mut app);
+        assert!(plain.contains("? for keybinds"));
+
+        app.status = Some("something happened".into());
+        let with_status = rendered(&mut app);
+        assert!(!with_status.contains("? for keybinds"));
+        assert!(with_status.contains("something happened"));
     }
 
     #[test]

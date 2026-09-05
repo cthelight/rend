@@ -133,10 +133,18 @@ Keyboard:
 | `f`              | toggle force (overwrite)        |
 | `o`              | toggle output format (flac/wav) |
 | `s`              | stop the current rip            |
+| `?`              | toggle the keybinds window      |
 | `q`/`esc`        | quit                            |
 
 Mouse: click to select, double-click a track to rip it, scroll wheel to
 scroll the drives and TOC lists. Buttons can be clicked as well.
+
+The drives sit in a left-hand panel, one entry per drive: the device and
+its label on the first line, and the loaded disc's artist, album, and
+year on the second. While a drive is ripping, its name line becomes a
+progress bar for that drive's rip. The table of contents (and the tags
+editor) fills the rest of the window on the right; `?` opens a window
+with every keybind.
 
 When a disc's table of contents is loaded, the disc is looked up on
 MusicBrainz in the background; the TOC panel then shows the track titles
@@ -157,8 +165,9 @@ can be tagged by hand; rips of it use those tags.
 When more than one drive is present, several can rip at the same time:
 each drive keeps its own rip state, so you can start a rip on one drive
 and switch to another without interrupting it. A drive that is currently
-ripping is marked with `▶` in the drives list, and the progress panel
-shows the selected drive's rip. As with the CLI, multi-drive rips write
+ripping shows its rip as a progress bar on its name line in the drives
+panel, and the bottom progress panel shows the selected drive's rip. As
+with the CLI, multi-drive rips write
 to per-device subdirectories of the output path so track numbers never
 collide.
 

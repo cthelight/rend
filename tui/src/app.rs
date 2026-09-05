@@ -56,9 +56,16 @@ pub struct Regions {
 }
 
 impl Regions {
-    /// The drive index under the given position, if any.
+    /// The drive entry under the given position, if any. Each entry is two
+    /// lines tall: the drive's name, then its album or status.
     pub fn drive_at(&self, col: u16, row: u16, scroll: usize, count: usize) -> Option<usize> {
-        self.row_at(self.drives, col, row, scroll, count)
+        let inner = self.drives.inner(Margin::new(1, 1));
+        if !inner.contains(Position::new(col, row)) {
+            return None;
+        }
+        let entry = ((row - inner.y) as usize) / 2;
+        let idx = entry + scroll;
+        (idx < count).then_some(idx)
     }
 
     /// The track index under the given position, if any.
@@ -174,6 +181,9 @@ pub struct Drive {
     pub label: String,
     pub status: String,
     pub disc: Option<String>,
+    /// The album matched to this drive's loaded disc, remembered so the
+    /// drives panel can show each drive's album at a glance.
+    pub album: Option<String>,
     device: Option<Device>,
     last_status: Option<DriveStatus>,
     #[cfg(test)]
@@ -187,6 +197,7 @@ impl Drive {
             label: "unknown".into(),
             status: String::new(),
             disc: None,
+            album: None,
             device: Some(device),
             last_status: None,
             #[cfg(test)]
@@ -202,6 +213,7 @@ impl Drive {
             label: DEMO_LABEL.into(),
             status: "disc present".into(),
             disc: Some("audio".into()),
+            album: None,
             device: None,
             last_status: Some(DriveStatus::DiscOk),
             #[cfg(test)]
@@ -418,6 +430,8 @@ struct DriveRip {
 /// The TUI application state.
 pub struct App {
     pub running: bool,
+    /// The keybinds help window, opened with `?`.
+    pub help: bool,
     pub focus: Focus,
     pub drives: Vec<Drive>,
     pub drive_sel: usize,
@@ -469,6 +483,7 @@ impl App {
     ) -> Self {
         let mut app = Self {
             running: true,
+            help: false,
             focus: Focus::Drives,
             drives: Vec::new(),
             drive_sel: 0,
@@ -551,6 +566,7 @@ impl App {
         self.meta_sel = 0;
         self.cover = None;
         self.editing = None;
+        self.remember_album();
         let idx = self.drive_sel;
         match self.drives[idx].toc() {
             Ok(toc) => {
@@ -576,6 +592,7 @@ impl App {
         self.meta_rx = None;
         self.meta_tx = None;
         self.meta_gen += 1;
+        self.remember_album();
         if let Some(rip) = self.rips.get_mut(&selected) {
             rip.state.states.clear();
         }
@@ -613,6 +630,7 @@ impl App {
             self.meta = Some(demo_meta_all());
             self.status = Some(self.match_status().unwrap_or_default());
             self.cover = Some(demo_cover());
+            self.remember_album();
             return;
         }
         let disc_toc = DiscToc {
@@ -664,6 +682,7 @@ impl App {
             self.status = Some(self.match_status().unwrap_or_default());
             self.fetch_cover();
         }
+        self.remember_album();
     }
 
     /// Applies pending metadata-lookup results for the selected disc.
@@ -696,6 +715,7 @@ impl App {
                     self.meta = Some(candidates.into_iter().map(|c| c.meta).collect());
                     self.status = Some(self.match_status().unwrap_or_default());
                     self.fetch_cover();
+                    self.remember_album();
                 }
                 MetaEvent::Cover {
                     id,
@@ -745,6 +765,41 @@ impl App {
         self.meta.as_ref().and_then(|m| m.get(self.meta_sel))
     }
 
+    /// The selected candidate as `artist — album (year)`, for the drives
+    /// panel. `None` while the lookup is pending or when nothing is filled
+    /// in yet.
+    fn album_summary(&self) -> Option<String> {
+        let disc = self.selected_meta()?;
+        if disc.album.is_empty() && disc.artist.is_empty() {
+            return None;
+        }
+        let year = disc
+            .year
+            .as_deref()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        let album = if disc.album.is_empty() {
+            "untitled"
+        } else {
+            disc.album.as_str()
+        };
+        let artist = if disc.artist.is_empty() {
+            "unknown artist"
+        } else {
+            disc.artist.as_str()
+        };
+        Some(format!("{artist} — {album}{year}"))
+    }
+
+    /// Remembers the loaded disc's album on the selected drive, so its panel
+    /// line keeps showing it after the selection moves on.
+    fn remember_album(&mut self) {
+        let album = self.album_summary();
+        if let Some(d) = self.drives.get_mut(self.drive_sel) {
+            d.album = album;
+        }
+    }
+
     /// The status line describing the selected candidate, if any.
     pub fn match_status(&self) -> Option<String> {
         let candidates = self.meta.as_ref()?;
@@ -789,6 +844,7 @@ impl App {
         self.cover = None;
         self.status = Some(self.match_status().unwrap_or_default());
         self.fetch_cover();
+        self.remember_album();
     }
 
     /// Starts fetching the selected candidate's cover art: built in for the
@@ -846,8 +902,18 @@ impl App {
             }
             return;
         }
+        if self.help {
+            match key.code {
+                // `?` and esc close the help; `q` still quits.
+                KeyCode::Char('?') | KeyCode::Esc => self.help = false,
+                KeyCode::Char('q') => self.running = false,
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
+            KeyCode::Char('?') => self.help = true,
             KeyCode::Char('f') => {
                 self.force = !self.force;
                 self.status = Some(format!(
@@ -955,6 +1021,7 @@ impl App {
         }]);
         self.meta_sel = 0;
         self.status = Some("no match found — enter the tags by hand".into());
+        self.remember_album();
     }
 
     /// Applies the editor's values to the selected candidate and closes it.
@@ -987,6 +1054,7 @@ impl App {
             }
         }
         self.status = Some(self.match_status().unwrap_or_default());
+        self.remember_album();
     }
 
     /// Closes the editor without saving.
@@ -1043,9 +1111,9 @@ impl App {
     }
 
     /// Handles a mouse event (click, double-click, move, scroll). While the
-    /// metadata editor is open, mouse input is ignored.
+    /// metadata editor or the help window is open, mouse input is ignored.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.editing.is_some() {
+        if self.editing.is_some() || self.help {
             return;
         }
         match mouse.kind {
@@ -1079,11 +1147,12 @@ impl App {
                 let pos = Position::new(mouse.column, mouse.row);
                 if self.regions.drives.contains(pos) {
                     self.focus = Focus::Drives;
+                    // The drives panel shows two lines per entry.
                     self.drives_scroll = scroll(
                         self.drives_scroll,
                         down,
                         self.drives.len(),
-                        self.visible(self.regions.drives),
+                        self.visible(self.regions.drives) / 2,
                     );
                 } else if self.regions.tracks.contains(pos) {
                     self.focus = Focus::Tracks;
@@ -1262,8 +1331,13 @@ impl App {
 
     /// Total bytes written and expected across the selected drive's rip.
     pub fn rip_totals(&self) -> (u64, u64) {
+        self.rip_progress(self.drive_sel)
+    }
+
+    /// Total bytes written and expected across the given drive's rip.
+    pub fn rip_progress(&self, idx: usize) -> (u64, u64) {
         self.rips
-            .get(&self.drive_sel)
+            .get(&idx)
             .map(|r| r.state.totals(&r.toc, &r.tracks))
             .unwrap_or((0, 0))
     }
@@ -1339,6 +1413,7 @@ impl App {
                 self.meta_rx = None;
                 self.meta_tx = None;
                 self.meta_gen += 1;
+                self.remember_album();
                 self.rips.remove(&idx);
                 self.status = Some(format!("ejecting {}", self.drives[idx].path));
             }
@@ -2044,11 +2119,57 @@ mod tests {
         assert!(app.meta.is_none());
         assert!(app.cover.is_none());
         assert!(app.disc_id.is_none());
+        assert!(app.drives[0].album.is_none());
         assert!(
             app.status
                 .as_deref()
                 .is_some_and(|s| s.contains("press enter to reload"))
         );
+    }
+
+    #[test]
+    fn question_mark_toggles_the_help_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        assert!(!app.help);
+
+        app.handle_key(key('?'));
+        assert!(app.help);
+
+        // While the help is open, normal keys do nothing.
+        app.handle_key(key('m'));
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album");
+        app.handle_key(key('r'));
+        assert!(!app.drive_ripping(app.drive_sel));
+
+        // Esc closes the help without quitting.
+        app.handle_key(key_event(KeyCode::Esc));
+        assert!(!app.help);
+        assert!(app.running);
+
+        // ? re-opens it, and ? closes it again.
+        app.handle_key(key('?'));
+        assert!(app.help);
+        app.handle_key(key('?'));
+        assert!(!app.help);
+    }
+
+    #[test]
+    fn each_drive_remembers_its_loaded_album() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.drives.push(Drive::demo());
+        app.drives[1].path = "/dev/sr1".into();
+
+        app.select_drive(1);
+        assert!(app.drives[0].album.is_some());
+        assert!(app.drives[1].album.is_some());
+
+        // Switching back keeps the other drive's album in place.
+        app.select_drive(0);
+        assert!(app.drives[0].album.is_some());
+        assert!(app.drives[1].album.is_some());
+        assert!(app.toc.is_some());
     }
 
     #[test]
