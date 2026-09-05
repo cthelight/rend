@@ -53,6 +53,40 @@ fn rip_with_missing_device_fails_cleanly() {
 }
 
 #[test]
+fn rip_with_two_missing_devices_fails_cleanly() {
+    bin()
+        .args([
+            "rip",
+            "-d",
+            "/dev/sr-definitely-not-there",
+            "-d",
+            "/dev/sr-definitely-not-either",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("device /dev/sr-definitely-not-there not found"));
+}
+
+#[test]
+fn rip_accepts_all_flag() {
+    // `--all` is accepted as a flag; with no hardware it reports no devices.
+    bin()
+        .args(["rip", "--all"])
+        .assert()
+        .failure()
+        .stderr(contains("no CD-ROM devices found"));
+}
+
+#[test]
+fn toc_with_two_devices_fails() {
+    bin()
+        .args(["toc", "-d", "/dev/sr0", "-d", "/dev/sr1"])
+        .assert()
+        .failure()
+        .stderr(contains("expected a single device"));
+}
+
+#[test]
 fn eject_with_missing_device_fails_cleanly() {
     bin()
         .args(["eject", "-d", "/dev/sr-definitely-not-there"])

@@ -2,6 +2,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::result::Result;
+use std::thread;
 
 use clap::Parser;
 use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track, WavWriter};
@@ -9,9 +10,9 @@ use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track,
 #[derive(Parser)]
 #[command(name = "rend", version, about = "Rip audio CDs from the command line")]
 struct Cli {
-    /// CD-ROM device to use (default: first device found).
+    /// CD-ROM device(s) to use (repeatable; default: first device found).
     #[arg(short, long, global = true)]
-    device: Option<String>,
+    devices: Vec<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -23,7 +24,7 @@ enum Command {
     Drives,
     /// Show the table of contents of the disc.
     Toc,
-    /// Rip audio tracks to WAV files.
+    /// Rip audio tracks to WAV files (across several drives in parallel).
     Rip {
         /// Directory to write WAV files to.
         #[arg(short, long, default_value = ".")]
@@ -34,6 +35,9 @@ enum Command {
         /// Overwrite existing files.
         #[arg(short, long)]
         force: bool,
+        /// Rip every discovered drive in parallel.
+        #[arg(long)]
+        all: bool,
     },
     /// Eject the disc.
     Eject,
@@ -53,14 +57,47 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
         Command::Drives => cmd_drives(),
-        Command::Toc => cmd_toc(cli.device.as_deref()),
+        Command::Toc => cmd_toc(single_device(&cli.devices)?),
         Command::Rip {
             output_dir,
             tracks,
             force,
-        } => cmd_rip(cli.device.as_deref(), &output_dir, &tracks, force),
-        Command::Eject => cmd_eject(cli.device.as_deref()),
+            all,
+        } => cmd_rip(&cli.devices, all, &output_dir, &tracks, force),
+        Command::Eject => cmd_eject(single_device(&cli.devices)?),
     }
+}
+
+/// A single-device subcommand must be given at most one `-d`.
+fn single_device(devices: &[String]) -> Result<Option<&str>, Error> {
+    if devices.len() > 1 {
+        return Err(Error::Unexpected(format!(
+            "expected a single device, got {len}: use `rend rip` for several at once",
+            len = devices.len()
+        )));
+    }
+    Ok(devices.first().map(String::as_str))
+}
+
+/// The devices `rend rip` works on: every discovered drive with `--all`,
+/// the explicit `-d` values, or the first discovered drive when none given.
+fn rip_devices(devices: &[String], all: bool) -> Result<Vec<Device>, Error> {
+    if all {
+        let found = Device::discover()?;
+        if found.is_empty() {
+            return Err(Error::NoDevices);
+        }
+        return Ok(found);
+    }
+    if devices.is_empty() {
+        let mut found = Device::discover()?;
+        found.truncate(1);
+        if found.is_empty() {
+            return Err(Error::NoDevices);
+        }
+        return Ok(found);
+    }
+    devices.iter().map(Device::open).collect()
 }
 
 /// Opens the device named by `path`, or the first device found.
@@ -125,8 +162,96 @@ fn cmd_toc(device: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn cmd_rip(device: Option<&str>, output_dir: &Path, only: &[u8], force: bool) -> Result<(), Error> {
-    let mut dev = open_device(device)?;
+fn cmd_rip(
+    devices: &[String],
+    all: bool,
+    output_dir: &Path,
+    only: &[u8],
+    force: bool,
+) -> Result<(), Error> {
+    let resolved = rip_devices(devices, all)?;
+
+    // One drive keeps the flat layout; several get a subdirectory each, named
+    // after the device (e.g. `sr0`), so track files never collide.
+    let multi = resolved.len() > 1;
+    let jobs: Vec<(Device, PathBuf, String)> = resolved
+        .into_iter()
+        .map(|dev| {
+            let base = dev
+                .path()
+                .rsplit('/')
+                .next()
+                .unwrap_or(dev.path())
+                .to_string();
+            let dir = if multi {
+                output_dir.join(&base)
+            } else {
+                output_dir.to_path_buf()
+            };
+            let prefix = if multi {
+                format!("[{base}] ")
+            } else {
+                String::new()
+            };
+            (dev, dir, prefix)
+        })
+        .collect();
+
+    // One worker thread per drive; they all run at the same time.
+    let mut handles = Vec::new();
+    for (dev, dir, prefix) in jobs {
+        let only = only.to_vec();
+        let progress = !multi;
+        let path = dev.path().to_string();
+        let handle = thread::Builder::new()
+            .name(format!("rend-rip-{path}"))
+            .spawn(move || rip_device(dev, &dir, &only, force, &prefix, progress))
+            .map_err(|e| Error::Unexpected(format!("failed to spawn rip thread: {e}")))?;
+        handles.push((path, handle));
+    }
+
+    let mut failed_drives = 0usize;
+    let mut tracks_total = 0usize;
+    let mut tracks_failed = 0usize;
+    for (path, handle) in handles {
+        match handle.join() {
+            Ok(Ok((tracks, failed))) => {
+                tracks_total += tracks;
+                tracks_failed += failed;
+                if failed > 0 {
+                    eprintln!("rend: {path}: {failed} of {tracks} track(s) failed");
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("rend: {path}: {e}");
+                failed_drives += 1;
+            }
+            Err(_) => {
+                eprintln!("rend: {path}: rip thread panicked");
+                failed_drives += 1;
+            }
+        }
+    }
+
+    let failed = failed_drives + tracks_failed;
+    if failed > 0 {
+        return Err(Error::Unexpected(format!(
+            "{failed} of {tracks_total} track(s) failed"
+        )));
+    }
+    Ok(())
+}
+
+/// Rips one drive's selected tracks to `out_dir`, returning the number of
+/// tracks attempted and how many of them failed.
+fn rip_device(
+    mut dev: Device,
+    out_dir: &Path,
+    only: &[u8],
+    force: bool,
+    prefix: &str,
+    progress: bool,
+) -> Result<(usize, usize), Error> {
     dev.require_disc()?;
     let toc = dev.toc()?;
 
@@ -158,47 +283,53 @@ fn cmd_rip(device: Option<&str>, output_dir: &Path, only: &[u8], force: bool) ->
         });
     }
 
-    std::fs::create_dir_all(output_dir)?;
+    std::fs::create_dir_all(out_dir)?;
     dev.spin_up().ok();
 
-    let mut failures = 0usize;
+    let mut failed = 0usize;
     for track in &selected {
         let end = toc.end_lba(track.number).unwrap_or(toc.leadout_lba);
         let frames = track.frames(end);
-        let path = output_dir.join(format!("track{:02}.wav", track.number));
+        let path = out_dir.join(format!("track{:02}.wav", track.number));
 
         if path.exists() && !force {
             eprintln!(
-                "rend: {} already exists (use --force to overwrite)",
+                "{prefix}{} already exists (use --force to overwrite)",
                 path.display()
             );
-            failures += 1;
+            failed += 1;
             continue;
         }
 
-        match rip_track(&mut dev, track, frames, &path) {
-            Ok(()) => eprintln!("track {:02}: wrote {}", track.number, path.display()),
+        match rip_track(&mut dev, track, frames, &path, prefix, progress) {
+            Ok(()) => eprintln!(
+                "{prefix}track {:02}: wrote {}",
+                track.number,
+                path.display()
+            ),
             Err(e) => {
                 std::fs::remove_file(&path).ok();
-                eprintln!("track {:02}: {e}", track.number);
-                failures += 1;
+                eprintln!("{prefix}track {:02}: {e}", track.number);
+                failed += 1;
             }
         }
     }
 
     dev.spin_down().ok();
-
-    if failures > 0 {
-        return Err(Error::Unexpected(format!(
-            "{failures} of {} track(s) failed",
-            selected.len()
-        )));
-    }
-    Ok(())
+    Ok((selected.len(), failed))
 }
 
-/// Rips a single track to a WAV file, reporting progress on stderr.
-fn rip_track(dev: &mut Device, track: &Track, frames: u32, path: &Path) -> io::Result<()> {
+/// Rips a single track to a WAV file, reporting progress on stderr when
+/// `progress` is set (only safe for a single drive — parallel drives would
+/// clobber each other's `\r` progress line).
+fn rip_track(
+    dev: &mut Device,
+    track: &Track,
+    frames: u32,
+    path: &Path,
+    prefix: &str,
+    progress: bool,
+) -> io::Result<()> {
     let mut stream = CddaStream::new(dev, track.start_lba, frames);
     let mut wav = WavWriter::create(path)?;
     let total = stream.total_bytes();
@@ -212,14 +343,18 @@ fn rip_track(dev: &mut Device, track: &Track, frames: u32, path: &Path) -> io::R
         }
         wav.write(&buf[..n])?;
         done += n as u64;
-        eprint!(
-            "\rtrack {:02}: {:3}%  ",
-            track.number,
-            done * 100 / total as u64
-        );
+        if progress {
+            eprint!(
+                "\r{prefix}track {:02}: {:3}%  ",
+                track.number,
+                done * 100 / total as u64
+            );
+        }
     }
 
-    eprint!("\r");
+    if progress {
+        eprint!("\r");
+    }
     wav.finish()
 }
 
@@ -245,5 +380,14 @@ mod tests {
         assert_eq!(fmt_duration(0), "0:00");
         assert_eq!(fmt_duration(FRAMES_PER_SECOND * 75), "1:15");
         assert_eq!(fmt_duration(FRAMES_PER_SECOND * 60 + 37), "1:00");
+    }
+
+    #[test]
+    fn single_device_rejects_multiple() {
+        let one = ["/dev/sr0".to_string()];
+        assert!(single_device(&one).is_ok());
+
+        let two = ["/dev/sr0".to_string(), "/dev/sr1".to_string()];
+        assert!(single_device(&two).is_err());
     }
 }

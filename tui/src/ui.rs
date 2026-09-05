@@ -69,12 +69,18 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
             } else {
                 (Style::default(), "○")
             };
+            let rip = if app.drive_ripping(i) {
+                Span::styled("  ▶", Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("")
+            };
             ListItem::new(Line::from(vec![
                 Span::raw(format!(" {marker} {:<14} {:<34.34} ", d.path, d.label)),
                 Span::styled(
                     d.status.clone(),
                     Style::default().fg(status_color(&d.status)),
                 ),
+                rip,
             ]))
             .style(style)
         })
@@ -143,7 +149,7 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
                 Style::default()
             };
             let marker = if i == app.track_sel { "▶" } else { " " };
-            let (text, color) = state_cell(app.rip.states.get(i));
+            let (text, color) = state_cell(app.selected_rip_state().and_then(|s| s.states.get(i)));
             Row::new(vec![
                 Cell::from(format!("{marker}{:>2}", t.number)),
                 Cell::from(t.kind.to_string()),
@@ -176,8 +182,15 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
 }
 
 fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
+    let rip = app.selected_rip_state();
+    let active = rip.is_some_and(|s| s.active);
     let force = if app.force { "force on" } else { "force off" };
-    let title = format!(" Ripping to {} · {force} ", app.out_dir.display());
+    let out_display = app
+        .selected_rip_out_dir()
+        .unwrap_or(app.out_dir.as_path())
+        .display()
+        .to_string();
+    let title = format!(" Ripping to {} · {force} ", out_display);
     let block = Block::bordered()
         .border_style(Style::default().fg(Color::DarkGray))
         .title(title);
@@ -197,12 +210,12 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         0.0
     };
     let pct = done * 100 / total.max(1);
-    let label = if app.rip.active {
-        match current_track(app) {
+    let label = if active {
+        match current_track(rip, app) {
             Some(n) => format!("track {n:02}  {pct}%"),
             None => "starting…".to_string(),
         }
-    } else if let Some(summary) = &app.rip.summary {
+    } else if let Some(summary) = rip.and_then(|s| s.summary.as_ref()) {
         summary.clone()
     } else {
         "idle".to_string()
@@ -215,15 +228,16 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         rows[0],
     );
 
-    let stats = if app.rip.active {
-        let eta = if app.rip.speed > 0.0 {
-            total.saturating_sub(done) as f64 / app.rip.speed
+    let speed = rip.map(|s| s.speed).unwrap_or(0.0);
+    let stats = if active {
+        let eta = if speed > 0.0 {
+            total.saturating_sub(done) as f64 / speed
         } else {
             f64::INFINITY
         };
         format!(
             "  speed {}   ETA {}   {}/{}",
-            fmt_rate(app.rip.speed),
+            fmt_rate(speed),
             fmt_eta(eta),
             fmt_bytes(done),
             fmt_bytes(total),
@@ -244,8 +258,8 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     ])
     .split(rows[2]);
 
-    let can_rip = app.toc.is_some() && !app.rip.active;
-    let can_eject = app.drives.get(app.drive_sel).is_some_and(|d| !d.is_demo()) && !app.rip.active;
+    let can_rip = app.toc.is_some() && !active;
+    let can_eject = app.drives.get(app.drive_sel).is_some_and(|d| !d.is_demo()) && !active;
     draw_button(
         f,
         btns[0],
@@ -267,13 +281,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         can_eject,
         app.hover == Hover::Eject,
     );
-    draw_button(
-        f,
-        btns[3],
-        "[s] stop",
-        app.rip.active,
-        app.hover == Hover::Stop,
-    );
+    draw_button(f, btns[3], "[s] stop", active, app.hover == Hover::Stop);
     regions.rip_selected = btns[0];
     regions.rip_all = btns[1];
     regions.eject = btns[2];
@@ -287,7 +295,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let (right, color) = match &app.status {
         Some(status) => (format!(" {status} "), Color::Yellow),
-        None if app.rip.active => (
+        None if app.drive_ripping(app.drive_sel) => (
             " [s] stop   [f] force   [q] quit ".to_string(),
             Color::Gray,
         ),
@@ -328,9 +336,8 @@ fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: b
     );
 }
 
-fn current_track(app: &App) -> Option<u8> {
-    let idx = app
-        .rip
+fn current_track(rip: Option<&crate::app::RipState>, app: &App) -> Option<u8> {
+    let idx = rip?
         .states
         .iter()
         .position(|s| matches!(s, TrackState::Ripping { .. }))?;

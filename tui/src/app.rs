@@ -1,5 +1,6 @@
 //! Application state: drives, table of contents, selection, and ripping.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,6 +104,57 @@ impl RipState {
             speed: 0.0,
             summary: None,
             sample: None,
+        }
+    }
+
+    /// Total bytes written and expected across this rip.
+    pub fn totals(&self) -> (u64, u64) {
+        let mut done = 0u64;
+        let mut total = 0u64;
+        for state in &self.states {
+            match state {
+                TrackState::Ripping {
+                    bytes_done,
+                    bytes_total,
+                } => {
+                    done += bytes_done;
+                    total += bytes_total;
+                }
+                TrackState::Done { bytes } => {
+                    done += bytes;
+                    total += bytes;
+                }
+                _ => {}
+            }
+        }
+        (done, total)
+    }
+
+    /// Recomputes the smoothed read speed from the newest progress sample.
+    pub fn update_speed(&mut self) {
+        let now = Instant::now();
+        let done: u64 = self
+            .states
+            .iter()
+            .map(|s| match s {
+                TrackState::Ripping { bytes_done, .. } => *bytes_done,
+                TrackState::Done { bytes } => *bytes,
+                _ => 0,
+            })
+            .sum();
+        if let Some((prev, when)) = self.sample {
+            let dt = now.duration_since(when).as_secs_f64();
+            if dt > 0.05 {
+                let inst = done.saturating_sub(prev) as f64 / dt;
+                self.speed = if self.speed == 0.0 {
+                    inst
+                } else {
+                    self.speed * 0.7 + inst * 0.3
+                };
+                self.sample = Some((done, now));
+            }
+        } else {
+            self.sample = Some((done, now));
         }
     }
 }
@@ -212,6 +264,20 @@ fn drive_label(info: &DeviceInfo) -> String {
     label
 }
 
+/// Everything about the rip running (or last run) on a single drive: its
+/// per-track state plus the worker thread and stop flag that drive it.
+struct DriveRip {
+    state: RipState,
+    /// Where this drive's WAV files go (a per-drive subdir when several
+    /// drives are present, so track numbers never collide).
+    out_dir: PathBuf,
+    /// The TOC the rip was started on, for mapping track numbers to indices.
+    toc: Toc,
+    rx: Option<mpsc::Receiver<RipEvent>>,
+    thread: Option<JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
 /// The TUI application state.
 pub struct App {
     pub running: bool,
@@ -223,15 +289,13 @@ pub struct App {
     pub disc_id: Option<String>,
     pub track_sel: usize,
     pub tracks_scroll: usize,
-    pub rip: RipState,
+    /// Rips keyed by drive index; several drives can rip at once.
+    rips: HashMap<usize, DriveRip>,
     pub force: bool,
     pub status: Option<String>,
     pub out_dir: PathBuf,
     pub hover: Hover,
     pub regions: Regions,
-    rx: Option<mpsc::Receiver<RipEvent>>,
-    rip_thread: Option<JoinHandle<()>>,
-    stop: Option<Arc<AtomicBool>>,
     last_click: Option<(u16, u16, Instant)>,
 }
 
@@ -248,15 +312,12 @@ impl App {
             disc_id: None,
             track_sel: 0,
             tracks_scroll: 0,
-            rip: RipState::default(),
+            rips: HashMap::new(),
             force,
             status: None,
             out_dir,
             hover: Hover::None,
             regions: Regions::default(),
-            rx: None,
-            rip_thread: None,
-            stop: None,
             last_click: None,
         };
 
@@ -293,12 +354,11 @@ impl App {
     }
 
     /// Selects a drive and loads its table of contents.
+    ///
+    /// Selecting is always allowed: any other drive keeps ripping in the
+    /// background, and each drive remembers its own rip state.
     pub fn select_drive(&mut self, idx: usize) {
         if idx >= self.drives.len() {
-            return;
-        }
-        if self.rip.active {
-            self.status = Some("a rip is in progress — press s to stop it first".into());
             return;
         }
         self.drive_sel = idx;
@@ -306,7 +366,6 @@ impl App {
         self.tracks_scroll = 0;
         self.toc = None;
         self.disc_id = None;
-        self.rip.states.clear();
         match self.drives[idx].toc() {
             Ok(toc) => {
                 self.disc_id = self.drives[idx].mcn();
@@ -418,83 +477,97 @@ impl App {
         double
     }
 
-    /// Applies all pending rip worker events.
+    /// Applies all pending rip worker events, across every drive that is
+    /// currently ripping.
     pub fn drain_rip_events(&mut self) {
-        let Some(rx) = self.rx.as_ref() else {
-            return;
-        };
-        let mut events = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            events.push(event);
-        }
-        for event in events {
-            match event {
-                RipEvent::TrackStarted { number } => {
-                    if let Some(state) = self.track_state_mut(number) {
-                        *state = TrackState::Ripping {
-                            bytes_done: 0,
-                            bytes_total: 0,
+        let paths: Vec<String> = self.drives.iter().map(|d| d.path.clone()).collect();
+        for (idx, rip) in self.rips.iter_mut() {
+            let Some(rx) = rip.rx.as_ref() else {
+                continue;
+            };
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            for event in events {
+                match event {
+                    RipEvent::TrackStarted { number } => {
+                        if let Some(i) = track_index(&rip.toc, number) {
+                            if let Some(slot) = rip.state.states.get_mut(i) {
+                                *slot = TrackState::Ripping {
+                                    bytes_done: 0,
+                                    bytes_total: 0,
+                                };
+                            }
+                        }
+                    }
+                    RipEvent::Progress {
+                        number,
+                        bytes_done,
+                        bytes_total,
+                    } => {
+                        if let Some(i) = track_index(&rip.toc, number) {
+                            if let Some(slot) = rip.state.states.get_mut(i) {
+                                *slot = TrackState::Ripping {
+                                    bytes_done,
+                                    bytes_total,
+                                };
+                            }
+                        }
+                        rip.state.update_speed();
+                    }
+                    RipEvent::TrackDone {
+                        number,
+                        path,
+                        bytes,
+                    } => {
+                        if let Some(i) = track_index(&rip.toc, number) {
+                            if let Some(slot) = rip.state.states.get_mut(i) {
+                                *slot = TrackState::Done { bytes };
+                            }
+                        }
+                        self.status = Some(format!("track {number:02}: wrote {}", path.display()));
+                        rip.state.update_speed();
+                    }
+                    RipEvent::TrackFailed { number, error } => {
+                        if let Some(i) = track_index(&rip.toc, number) {
+                            if let Some(slot) = rip.state.states.get_mut(i) {
+                                *slot = TrackState::Failed(error);
+                            }
+                        }
+                    }
+                    RipEvent::TrackSkipped { number, reason } => {
+                        if let Some(i) = track_index(&rip.toc, number) {
+                            if let Some(slot) = rip.state.states.get_mut(i) {
+                                *slot = TrackState::Skipped(reason);
+                            }
+                        }
+                    }
+                    RipEvent::Finished {
+                        failed,
+                        total,
+                        stopped,
+                    } => {
+                        let drive = paths.get(*idx).map(String::as_str).unwrap_or("");
+                        let summary = if stopped {
+                            "ripping stopped".to_string()
+                        } else if failed == 0 {
+                            format!(
+                                "done — {total} track(s) on {drive} to {}",
+                                rip.out_dir.display()
+                            )
+                        } else {
+                            format!("finished — {failed} of {total} track(s) failed on {drive}")
                         };
+                        rip.state.active = false;
+                        rip.state.speed = 0.0;
+                        rip.state.sample = None;
+                        rip.state.summary = Some(summary);
+                        rip.rx = None;
+                        if let Some(thread) = rip.thread.take() {
+                            let _ = thread.join();
+                        }
                     }
-                }
-                RipEvent::Progress {
-                    number,
-                    bytes_done,
-                    bytes_total,
-                } => {
-                    if let Some(state) = self.track_state_mut(number) {
-                        *state = TrackState::Ripping {
-                            bytes_done,
-                            bytes_total,
-                        };
-                    }
-                    self.update_speed();
-                }
-                RipEvent::TrackDone {
-                    number,
-                    path,
-                    bytes,
-                } => {
-                    if let Some(state) = self.track_state_mut(number) {
-                        *state = TrackState::Done { bytes };
-                    }
-                    self.status = Some(format!("track {number:02}: wrote {}", path.display()));
-                    self.update_speed();
-                }
-                RipEvent::TrackFailed { number, error } => {
-                    if let Some(state) = self.track_state_mut(number) {
-                        *state = TrackState::Failed(error);
-                    }
-                }
-                RipEvent::TrackSkipped { number, reason } => {
-                    if let Some(state) = self.track_state_mut(number) {
-                        *state = TrackState::Skipped(reason);
-                    }
-                }
-                RipEvent::Finished {
-                    failed,
-                    total,
-                    stopped,
-                } => {
-                    let summary = if stopped {
-                        "ripping stopped".to_string()
-                    } else if failed == 0 {
-                        format!(
-                            "done — {total} track(s) written to {}",
-                            self.out_dir.display()
-                        )
-                    } else {
-                        format!("finished — {failed} of {total} track(s) failed")
-                    };
-                    self.rip.active = false;
-                    self.rip.speed = 0.0;
-                    self.rip.sample = None;
-                    self.rip.summary = Some(summary);
-                    self.rx = None;
-                    if let Some(thread) = self.rip_thread.take() {
-                        let _ = thread.join();
-                    }
-                    self.stop = None;
                 }
             }
         }
@@ -502,7 +575,7 @@ impl App {
 
     /// Re-queries drive statuses; invalidates the TOC if the disc changed.
     pub fn refresh_drives(&mut self) {
-        if self.drives.iter().all(Drive::is_demo) || self.rip.active {
+        if self.drives.iter().all(Drive::is_demo) || self.any_rip_active() {
             return;
         }
         let selected = self.drive_sel;
@@ -517,7 +590,9 @@ impl App {
         if changed {
             self.toc = None;
             self.disc_id = None;
-            self.rip.states.clear();
+            if let Some(rip) = self.rips.get_mut(&selected) {
+                rip.state.states.clear();
+            }
             let path = self.drives[selected].path.clone();
             self.status = Some(format!(
                 "disc state changed on {path} — press enter to reload"
@@ -525,37 +600,44 @@ impl App {
         }
     }
 
-    /// Stops an in-flight rip and waits for the worker to exit.
+    /// Stops every in-flight rip and waits for all workers to exit.
     pub fn shutdown(&mut self) {
-        if let Some(flag) = &self.stop {
-            flag.store(true, Ordering::SeqCst);
+        for rip in self.rips.values_mut() {
+            rip.stop.store(true, Ordering::SeqCst);
         }
-        if let Some(thread) = self.rip_thread.take() {
-            let _ = thread.join();
+        for rip in self.rips.values_mut() {
+            if let Some(thread) = rip.thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 
-    /// Total bytes written and expected across the current rip.
+    /// `true` if any drive has a rip in progress.
+    pub fn any_rip_active(&self) -> bool {
+        self.rips.values().any(|r| r.state.active)
+    }
+
+    /// Whether the given drive has a rip in progress.
+    pub fn drive_ripping(&self, idx: usize) -> bool {
+        self.rips.get(&idx).is_some_and(|r| r.state.active)
+    }
+
+    /// The rip state of the selected drive, if that drive has one.
+    pub fn selected_rip_state(&self) -> Option<&RipState> {
+        self.rips.get(&self.drive_sel).map(|r| &r.state)
+    }
+
+    /// The output directory of the selected drive's rip, if any.
+    pub fn selected_rip_out_dir(&self) -> Option<&std::path::Path> {
+        self.rips.get(&self.drive_sel).map(|r| r.out_dir.as_path())
+    }
+
+    /// Total bytes written and expected across the selected drive's rip.
     pub fn rip_totals(&self) -> (u64, u64) {
-        let mut done = 0u64;
-        let mut total = 0u64;
-        for state in &self.rip.states {
-            match state {
-                TrackState::Ripping {
-                    bytes_done,
-                    bytes_total,
-                } => {
-                    done += bytes_done;
-                    total += bytes_total;
-                }
-                TrackState::Done { bytes } => {
-                    done += bytes;
-                    total += bytes;
-                }
-                _ => {}
-            }
-        }
-        (done, total)
+        self.rips
+            .get(&self.drive_sel)
+            .map(|r| r.state.totals())
+            .unwrap_or((0, 0))
     }
 
     /// The number of tracks currently loaded, if any.
@@ -598,17 +680,17 @@ impl App {
     }
 
     pub fn stop_rip(&mut self) {
-        if !self.rip.active {
-            return;
+        if let Some(rip) = self.rips.get_mut(&self.drive_sel) {
+            if !rip.state.active {
+                return;
+            }
+            rip.stop.store(true, Ordering::SeqCst);
+            self.status = Some("stopping rip…".into());
         }
-        if let Some(flag) = &self.stop {
-            flag.store(true, Ordering::SeqCst);
-        }
-        self.status = Some("stopping rip…".into());
     }
 
     pub fn eject(&mut self) {
-        if self.rip.active {
+        if self.drive_ripping(self.drive_sel) {
             self.status = Some("stop the rip before ejecting".into());
             return;
         }
@@ -617,7 +699,7 @@ impl App {
             Ok(()) => {
                 self.toc = None;
                 self.disc_id = None;
-                self.rip.states.clear();
+                self.rips.remove(&idx);
                 self.status = Some(format!("ejecting {}", self.drives[idx].path));
             }
             Err(e) => self.status = Some(e),
@@ -625,17 +707,18 @@ impl App {
     }
 
     fn start_rip(&mut self, tracks: Vec<u8>) {
-        if self.rip.active {
-            self.status = Some("a rip is already running".into());
+        if self.drive_ripping(self.drive_sel) {
+            self.status = Some("a rip is already running on this drive".into());
             return;
         }
         let Some(toc) = self.toc.clone() else {
             return;
         };
-        let source = if self.drives[self.drive_sel].is_demo() {
+        let idx = self.drive_sel;
+        let source = if self.drives[idx].is_demo() {
             RipSource::Demo(DemoSource::new())
         } else {
-            let path = self.drives[self.drive_sel].path.clone();
+            let path = self.drives[idx].path.clone();
             match Device::open(&path) {
                 Ok(dev) => RipSource::Device(dev),
                 Err(e) => {
@@ -644,27 +727,41 @@ impl App {
                 }
             }
         };
+        // When several drives are present, give each its own subdir so track
+        // numbers never collide across drives.
+        let out_dir = if self.drives.len() > 1 {
+            let base = self.drives[idx].path.rsplit('/').next().unwrap_or("drive");
+            self.out_dir.join(base)
+        } else {
+            self.out_dir.clone()
+        };
         let count = tracks.len();
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let job = RipJob {
             source,
-            toc,
+            toc: toc.clone(),
             tracks,
-            out_dir: self.out_dir.clone(),
+            out_dir: out_dir.clone(),
             force: self.force,
             stop: stop.clone(),
         };
         let thread = rip::spawn(job, tx);
-        self.rip = RipState::fresh(self.track_count());
-        self.rip.active = true;
-        self.rx = Some(rx);
-        self.rip_thread = Some(thread);
-        self.stop = Some(stop);
+        let mut state = RipState::fresh(self.track_count());
+        state.active = true;
+        let rip = DriveRip {
+            state,
+            out_dir: out_dir.clone(),
+            toc,
+            rx: Some(rx),
+            thread: Some(thread),
+            stop,
+        };
+        self.rips.insert(idx, rip);
         self.status = Some(format!(
             "ripping {} track(s) to {}",
             count,
-            self.out_dir.display()
+            out_dir.display()
         ));
     }
 
@@ -688,40 +785,6 @@ impl App {
                 }
             }
             Focus::Tracks => self.track_sel = next,
-        }
-    }
-
-    fn track_state_mut(&mut self, number: u8) -> Option<&mut TrackState> {
-        let toc = self.toc.as_ref()?;
-        let idx = toc.tracks.iter().position(|t| t.number == number)?;
-        self.rip.states.get_mut(idx)
-    }
-
-    fn update_speed(&mut self) {
-        let now = Instant::now();
-        let done: u64 = self
-            .rip
-            .states
-            .iter()
-            .map(|s| match s {
-                TrackState::Ripping { bytes_done, .. } => *bytes_done,
-                TrackState::Done { bytes } => *bytes,
-                _ => 0,
-            })
-            .sum();
-        if let Some((prev, when)) = self.rip.sample {
-            let dt = now.duration_since(when).as_secs_f64();
-            if dt > 0.05 {
-                let inst = done.saturating_sub(prev) as f64 / dt;
-                self.rip.speed = if self.rip.speed == 0.0 {
-                    inst
-                } else {
-                    self.rip.speed * 0.7 + inst * 0.3
-                };
-                self.rip.sample = Some((done, now));
-            }
-        } else {
-            self.rip.sample = Some((done, now));
         }
     }
 
@@ -768,6 +831,11 @@ fn scroll(current: usize, down: bool, count: usize, visible: usize) -> usize {
     }
 }
 
+/// The index of the given track number within a TOC, if present.
+fn track_index(toc: &Toc, number: u8) -> Option<usize> {
+    toc.tracks.iter().position(|t| t.number == number)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,10 +847,23 @@ mod tests {
 
     fn drain_until_finished(app: &mut App, timeout: Duration) {
         let start = Instant::now();
-        while app.rip.active {
+        while app.selected_rip_state().is_some_and(|r| r.active) {
             app.drain_rip_events();
             if start.elapsed() > timeout {
                 panic!("rip did not finish in time");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.drain_rip_events();
+    }
+
+    /// Drains until every drive's rip has finished.
+    fn drain_all_until_idle(app: &mut App, timeout: Duration) {
+        let start = Instant::now();
+        while app.any_rip_active() {
+            app.drain_rip_events();
+            if start.elapsed() > timeout {
+                panic!("rips did not finish in time");
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -809,16 +890,47 @@ mod tests {
         let mut app = demo_app(dir.path());
         app.track_sel = 2;
         app.rip_selected_track();
-        assert!(app.rip.active);
+        assert!(app.drive_ripping(app.drive_sel));
         drain_until_finished(&mut app, Duration::from_secs(10));
 
-        let state = &app.rip.states[2];
+        let state = app.selected_rip_state().unwrap();
         assert!(matches!(
-            state,
+            &state.states[2],
             TrackState::Done { bytes } if *bytes == (150 * FRAME_SIZE) as u64
         ));
-        assert!(app.rip.summary.is_some());
+        assert!(state.summary.is_some());
         assert!(dir.path().join("track03.wav").exists());
+    }
+
+    #[test]
+    fn rips_two_demo_drives_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        // Add a second simulated drive to exercise the parallel path. Give it
+        // a distinct path so its per-drive subdir differs from drive 0's.
+        app.drives.push(Drive::demo());
+        app.drives[1].path = "/dev/sr-demo2".into();
+
+        // Rip the short track 3 on drive 0.
+        app.select_drive(0);
+        app.track_sel = 2;
+        app.rip_selected_track();
+        assert!(app.drive_ripping(0));
+
+        // Switch to drive 1 and rip the same track there, in parallel. Drive 0
+        // keeps ripping in the background; its rip state is preserved.
+        app.select_drive(1);
+        app.track_sel = 2;
+        app.rip_selected_track();
+        assert!(app.drive_ripping(1));
+        assert!(app.any_rip_active());
+
+        drain_all_until_idle(&mut app, Duration::from_secs(15));
+
+        assert!(!app.any_rip_active());
+        // With two drives present, each wrote into its own per-drive subdir.
+        assert!(dir.path().join("sr-demo/track03.wav").exists());
+        assert!(dir.path().join("sr-demo2/track03.wav").exists());
     }
 
     #[test]
@@ -830,7 +942,10 @@ mod tests {
         app.rip_selected_track();
         drain_until_finished(&mut app, Duration::from_secs(5));
 
-        assert!(matches!(&app.rip.states[2], TrackState::Skipped(_)));
+        assert!(matches!(
+            app.selected_rip_state().unwrap().states[2],
+            TrackState::Skipped(_)
+        ));
         assert_eq!(
             std::fs::read(dir.path().join("track03.wav")).unwrap(),
             b"old"
@@ -866,7 +981,7 @@ mod tests {
         toc.tracks[0].kind = rend_core::TrackType::Data;
         app.track_sel = 0;
         app.rip_selected_track();
-        assert!(!app.rip.active);
+        assert!(!app.drive_ripping(app.drive_sel));
         assert!(app.status.is_some());
     }
 
@@ -925,9 +1040,9 @@ mod tests {
         app.handle_mouse(click(10, 6));
         app.handle_mouse(click(10, 6));
 
-        assert!(app.rip.active);
+        assert!(app.drive_ripping(app.drive_sel));
         drain_until_finished(&mut app, Duration::from_secs(10));
-        assert!(app.rip.summary.is_some());
+        assert!(app.selected_rip_state().unwrap().summary.is_some());
         assert!(dir.path().join("track03.wav").exists());
     }
 
