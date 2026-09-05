@@ -10,7 +10,7 @@ DEBUG_DIR   = target/debug
 
 .DEFAULT_GOAL := all
 
-.PHONY: all debug release install install-tui uninstall test clippy fmt lint clean help
+.PHONY: all debug release install install-cli install-tui uninstall test clippy fmt lint clean help
 
 all: debug
 
@@ -22,8 +22,11 @@ debug:
 release:
 	$(CARGO) build --release
 
-## Install the release binary into $(BINDIR)
-install: release
+## Install both binaries into $(BINDIR)
+install: install-cli install-tui
+
+## Install the release CLI binary into $(BINDIR)
+install-cli: release
 	install -d $(BINDIR)
 	install -m 0755 $(RELEASE_DIR)/$(BIN) $(BINDIR)/$(BIN)
 
@@ -65,7 +68,8 @@ help:
 	@echo "  all          Build the debug binary (default)"
 	@echo "  debug        Build the debug binary"
 	@echo "  release      Build the release binary"
-	@echo "  install      Build and install '$(BIN)' to $(PREFIX)/bin"
+	@echo "  install      Build and install '$(BIN)' and '$(TUI_BIN)' to $(PREFIX)/bin"
+	@echo "  install-cli  Build and install '$(BIN)' to $(PREFIX)/bin"
 	@echo "  install-tui  Build and install '$(TUI_BIN)' to $(PREFIX)/bin"
 	@echo "  uninstall    Remove installed binaries from $(PREFIX)/bin"
 	@echo "  test         Run the test suite"
