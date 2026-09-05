@@ -1,0 +1,15 @@
+[package]
+name = "rend-tui"
+description = "Interactive TUI for rend: browse drives, inspect TOCs, and watch rips in real time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rend-core = { path = "../core" }
+clap = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

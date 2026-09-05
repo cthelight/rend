@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli"]
+members = ["core", "cli", "tui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,8 @@ rust-version = "1.85"
 libc = "0.2"
 thiserror = "2"
 clap = { version = "4", features = ["derive", "color"] }
+ratatui = "0.29"
+crossterm = "0.28"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"

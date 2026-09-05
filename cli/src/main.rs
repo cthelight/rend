@@ -4,10 +4,7 @@ use std::process::ExitCode;
 use std::result::Result;
 
 use clap::Parser;
-use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track};
-
-mod wav;
-use wav::WavWriter;
+use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track, WavWriter};
 
 #[derive(Parser)]
 #[command(name = "rend", version, about = "Rip audio CDs from the command line")]
