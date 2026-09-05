@@ -5,10 +5,12 @@ use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::prelude::AsRawFd;
 
-use libc::{c_char, c_ulong};
+use libc::c_char;
 
 use crate::error::{Error, Result};
-use crate::sys::{self, Cdrom_generic_command, Cdrom_mcn, Cdrom_tocentry, Cdrom_tochdr};
+use crate::sys::{
+    self, Cdrom_generic_command, Cdrom_mcn, Cdrom_tocentry, Cdrom_tochdr, ioctl_cmd, ioctl_with,
+};
 use crate::toc::Toc;
 
 /// A CD-ROM device (e.g. `/dev/sr0`).
@@ -336,29 +338,6 @@ impl std::fmt::Display for DiscStatus {
             Self::Mixed => "mixed audio/data",
         };
         f.write_str(s)
-    }
-}
-
-/// Runs a cdrom ioctl that takes no argument, returning its status value.
-fn ioctl_cmd(file: &File, req: c_ulong) -> io::Result<i32> {
-    // SAFETY: the fd is owned by `file` and valid; no user data is passed.
-    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req) };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(ret)
-    }
-}
-
-/// Runs a cdrom ioctl operating on a `#[repr(C)]` argument.
-fn ioctl_with<T>(file: &File, req: c_ulong, arg: &mut T) -> io::Result<()> {
-    // SAFETY: `arg` is a repr(C) struct whose layout matches the kernel's
-    // (see the ABI tests in `sys`), and it outlives the call.
-    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req, arg as *mut T) };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
     }
 }
 

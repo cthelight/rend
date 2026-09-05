@@ -3,7 +3,34 @@
 //! Ioctl numbers and struct layouts match the kernel UAPI header; the tests
 //! at the bottom pin the ABI so any drift breaks the build.
 
+use std::fs::File;
+use std::io;
+use std::os::unix::prelude::AsRawFd;
+
 use libc::{c_char, c_int, c_uchar, c_uint, c_ulong};
+
+/// Runs a cdrom ioctl that takes no argument, returning its status value.
+pub(crate) fn ioctl_cmd(file: &File, req: c_ulong) -> io::Result<i32> {
+    // SAFETY: the fd is owned by `file` and valid; no user data is passed.
+    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req) };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret)
+    }
+}
+
+/// Runs a cdrom ioctl operating on a `#[repr(C)]` argument.
+pub(crate) fn ioctl_with<T>(file: &File, req: c_ulong, arg: &mut T) -> io::Result<()> {
+    // SAFETY: `arg` is a repr(C) struct whose layout matches the kernel's
+    // (see the ABI tests in this module), and it outlives the call.
+    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req, arg as *mut T) };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ioctl command numbers
