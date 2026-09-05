@@ -1,0 +1,10 @@
+[package]
+name = "rend-core"
+description = "Low-level Linux CD-ROM access: device discovery, TOC, and CDDA audio reading"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+thiserror = { workspace = true }
