@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "tui"]
+members = ["core", "encode", "cli", "tui"]
 
 [workspace.package]
 version = "0.1.0"

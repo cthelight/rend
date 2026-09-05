@@ -1,0 +1,9 @@
+[package]
+name = "rend-encode"
+description = "Output formats for rend: WAV writing and single-pass FLAC transcoding via ffmpeg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

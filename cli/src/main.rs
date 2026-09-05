@@ -5,7 +5,8 @@ use std::result::Result;
 use std::thread;
 
 use clap::Parser;
-use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track, WavWriter};
+use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track};
+use rend_encode::{Format, ffmpeg_available};
 
 #[derive(Parser)]
 #[command(name = "rend", version, about = "Rip audio CDs from the command line")]
@@ -24,11 +25,14 @@ enum Command {
     Drives,
     /// Show the table of contents of the disc.
     Toc,
-    /// Rip audio tracks to WAV files (across several drives in parallel).
+    /// Rip audio tracks to FLAC (default) or WAV files (across several drives in parallel).
     Rip {
-        /// Directory to write WAV files to.
+        /// Directory to write the track files to.
         #[arg(short, long, default_value = ".")]
         output_dir: PathBuf,
+        /// Output format: flac (default, transcoded with ffmpeg) or wav.
+        #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
+        format: Format,
         /// Only rip the given track number (repeatable; default: all audio tracks).
         #[arg(short = 't', long = "track")]
         tracks: Vec<u8>,
@@ -60,10 +64,11 @@ fn run(cli: Cli) -> Result<(), Error> {
         Command::Toc => cmd_toc(single_device(&cli.devices)?),
         Command::Rip {
             output_dir,
+            format,
             tracks,
             force,
             all,
-        } => cmd_rip(&cli.devices, all, &output_dir, &tracks, force),
+        } => cmd_rip(&cli.devices, all, &output_dir, format, &tracks, force),
         Command::Eject => cmd_eject(single_device(&cli.devices)?),
     }
 }
@@ -166,9 +171,16 @@ fn cmd_rip(
     devices: &[String],
     all: bool,
     output_dir: &Path,
+    format: Format,
     only: &[u8],
     force: bool,
 ) -> Result<(), Error> {
+    if format.requires_ffmpeg() && !ffmpeg_available() {
+        return Err(Error::Unexpected(
+            "ffmpeg not found in PATH — install it for FLAC output, or rip with --format wav"
+                .into(),
+        ));
+    }
     let resolved = rip_devices(devices, all)?;
 
     // One drive keeps the flat layout; several get a subdirectory each, named
@@ -205,7 +217,7 @@ fn cmd_rip(
         let path = dev.path().to_string();
         let handle = thread::Builder::new()
             .name(format!("rend-rip-{path}"))
-            .spawn(move || rip_device(dev, &dir, &only, force, &prefix, progress))
+            .spawn(move || rip_device(dev, &dir, &only, format, force, &prefix, progress))
             .map_err(|e| Error::Unexpected(format!("failed to spawn rip thread: {e}")))?;
         handles.push((path, handle));
     }
@@ -242,12 +254,13 @@ fn cmd_rip(
     Ok(())
 }
 
-/// Rips one drive's selected tracks to `out_dir`, returning the number of
-/// tracks attempted and how many of them failed.
+/// Rips one drive's selected tracks to `out_dir` in the given format,
+/// returning the number of tracks attempted and how many of them failed.
 fn rip_device(
     mut dev: Device,
     out_dir: &Path,
     only: &[u8],
+    format: Format,
     force: bool,
     prefix: &str,
     progress: bool,
@@ -290,7 +303,7 @@ fn rip_device(
     for track in &selected {
         let end = toc.end_lba(track.number).unwrap_or(toc.leadout_lba);
         let frames = track.frames(end);
-        let path = out_dir.join(format!("track{:02}.wav", track.number));
+        let path = out_dir.join(format!("track{:02}.{}", track.number, format.extension()));
 
         if path.exists() && !force {
             eprintln!(
@@ -301,7 +314,7 @@ fn rip_device(
             continue;
         }
 
-        match rip_track(&mut dev, track, frames, &path, prefix, progress) {
+        match rip_track(&mut dev, track, frames, &path, format, prefix, progress) {
             Ok(()) => eprintln!(
                 "{prefix}track {:02}: wrote {}",
                 track.number,
@@ -319,19 +332,20 @@ fn rip_device(
     Ok((selected.len(), failed))
 }
 
-/// Rips a single track to a WAV file, reporting progress on stderr when
-/// `progress` is set (only safe for a single drive — parallel drives would
-/// clobber each other's `\r` progress line).
+/// Rips a single track to an output file in the given format, reporting
+/// progress on stderr when `progress` is set (only safe for a single drive —
+/// parallel drives would clobber each other's `\r` progress line).
 fn rip_track(
     dev: &mut Device,
     track: &Track,
     frames: u32,
     path: &Path,
+    format: Format,
     prefix: &str,
     progress: bool,
 ) -> io::Result<()> {
     let mut stream = CddaStream::new(dev, track.start_lba, frames);
-    let mut wav = WavWriter::create(path)?;
+    let mut file = format.create_file(path)?;
     let total = stream.total_bytes();
     let mut buf = vec![0u8; FRAMES_PER_SECOND as usize * FRAME_SIZE];
     let mut done = 0u64;
@@ -341,7 +355,7 @@ fn rip_track(
         if n == 0 {
             break;
         }
-        wav.write(&buf[..n])?;
+        file.write(&buf[..n])?;
         done += n as u64;
         if progress {
             eprint!(
@@ -355,7 +369,7 @@ fn rip_track(
     if progress {
         eprint!("\r");
     }
-    wav.finish()
+    file.finish()
 }
 
 fn cmd_eject(device: Option<&str>) -> Result<(), Error> {

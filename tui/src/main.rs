@@ -20,6 +20,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use rend_encode::Format;
 
 mod app;
 mod demo;
@@ -39,9 +40,13 @@ struct Cli {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// Directory to write ripped WAV files to.
+    /// Directory to write the ripped track files to.
     #[arg(short, long, default_value = ".")]
     output_dir: PathBuf,
+
+    /// Output format: flac (default, transcoded with ffmpeg) or wav.
+    #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
+    format: Format,
 
     /// Overwrite existing files.
     #[arg(short, long)]
@@ -68,6 +73,7 @@ fn run(cli: &Cli) -> io::Result<()> {
         cli.device.as_deref(),
         cli.output_dir.clone(),
         cli.force,
+        cli.format,
         cli.demo,
     );
     let mut terminal = setup_terminal()?;

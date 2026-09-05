@@ -2,13 +2,14 @@
 //! progress over an [`std::sync::mpsc`] channel.
 
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
-use rend_core::{CddaStream, Device, FRAME_SIZE, FRAMES_PER_SECOND, FrameSource, Toc, WavWriter};
+use rend_core::{CddaStream, Device, FRAME_SIZE, FRAMES_PER_SECOND, FrameSource, Toc, Track};
+use rend_encode::Format;
 
 use crate::demo::DemoSource;
 
@@ -25,7 +26,7 @@ pub enum RipEvent {
         bytes_done: u64,
         bytes_total: u64,
     },
-    /// A track finished and its WAV file was written.
+    /// A track finished and its output file was written.
     TrackDone {
         number: u8,
         path: PathBuf,
@@ -70,6 +71,8 @@ pub struct RipJob {
     pub toc: Toc,
     pub tracks: Vec<u8>,
     pub out_dir: PathBuf,
+    /// The format the track files are written in.
+    pub format: Format,
     pub force: bool,
     /// Set to make the worker stop between chunks.
     pub stop: Arc<AtomicBool>,
@@ -114,16 +117,40 @@ fn worker(mut job: RipJob, tx: Sender<RipEvent>) {
     .ok();
 }
 
+/// Everything needed to read and encode a single track.
+struct TrackSpec {
+    number: u8,
+    lba: u32,
+    frames: u32,
+    path: PathBuf,
+    format: Format,
+}
+
+impl TrackSpec {
+    fn new(job: &RipJob, track: &Track, frames: u32) -> Self {
+        Self {
+            number: track.number,
+            lba: track.start_lba,
+            frames,
+            path: job.out_dir.join(format!(
+                "track{:02}.{}",
+                track.number,
+                job.format.extension()
+            )),
+            format: job.format,
+        }
+    }
+}
+
 fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), String> {
     let track = match job.toc.track(number) {
         Some(track) => track,
         None => return Err(format!("track {number} not found on disc")),
     };
     let end = job.toc.end_lba(number).unwrap_or(job.toc.leadout_lba);
-    let frames = track.frames(end);
-    let path = job.out_dir.join(format!("track{number:02}.wav"));
+    let spec = TrackSpec::new(job, track, track.frames(end));
 
-    if path.exists() && !job.force {
+    if spec.path.exists() && !job.force {
         tx.send(RipEvent::TrackSkipped {
             number,
             reason: "output exists (force is off)".into(),
@@ -135,26 +162,18 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
     std::fs::create_dir_all(&job.out_dir).map_err(|e| e.to_string())?;
 
     tx.send(RipEvent::TrackStarted { number }).ok();
-    match read_track(
-        &mut job.source,
-        number,
-        track.start_lba,
-        frames,
-        &path,
-        tx,
-        &job.stop,
-    ) {
+    match read_track(&mut job.source, &spec, tx, &job.stop) {
         Ok(bytes) => {
             tx.send(RipEvent::TrackDone {
                 number,
-                path,
+                path: spec.path,
                 bytes,
             })
             .ok();
             Ok(())
         }
         Err(e) => {
-            std::fs::remove_file(&path).ok();
+            std::fs::remove_file(&spec.path).ok();
             Err(e.to_string())
         }
     }
@@ -162,15 +181,12 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
 
 fn read_track(
     source: &mut RipSource,
-    number: u8,
-    lba: u32,
-    frames: u32,
-    path: &Path,
+    spec: &TrackSpec,
     tx: &Sender<RipEvent>,
     stop: &AtomicBool,
 ) -> io::Result<u64> {
-    let mut stream = CddaStream::new(source, lba, frames);
-    let mut wav = WavWriter::create(path)?;
+    let mut stream = CddaStream::new(source, spec.lba, spec.frames);
+    let mut file = spec.format.create_file(&spec.path)?;
     let total = stream.total_bytes() as u64;
     let mut buf = vec![0u8; FRAMES_PER_SECOND as usize * FRAME_SIZE];
     let mut done = 0u64;
@@ -186,18 +202,18 @@ fn read_track(
         if n == 0 {
             break;
         }
-        wav.write(&buf[..n])?;
+        file.write(&buf[..n])?;
         done += n as u64;
         tx.send(RipEvent::Progress {
-            number,
+            number: spec.number,
             bytes_done: done,
             bytes_total: total,
         })
         .ok();
     }
 
-    wav.finish()?;
-    Ok(done)
+    file.finish()?;
+    Ok(std::fs::metadata(&spec.path)?.len())
 }
 
 #[cfg(test)]
@@ -208,13 +224,14 @@ mod tests {
 
     use crate::demo::DemoDisc;
 
-    fn run_job(tracks: Vec<u8>, out_dir: PathBuf, force: bool) -> Vec<RipEvent> {
+    fn run_job(tracks: Vec<u8>, out_dir: PathBuf, force: bool, format: Format) -> Vec<RipEvent> {
         let (tx, rx) = mpsc::channel();
         let job = RipJob {
             source: RipSource::Demo(DemoSource::with_delay(Duration::ZERO)),
             toc: DemoDisc::new().toc,
             tracks,
             out_dir,
+            format,
             force,
             stop: Arc::new(AtomicBool::new(false)),
         };
@@ -232,16 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn rips_a_demo_track_to_wav() {
+    fn rips_a_demo_track_to_flac_by_default() {
         let dir = tempfile::tempdir().unwrap();
-        let events = run_job(vec![3], dir.path().to_path_buf(), false);
+        let events = run_job(vec![3], dir.path().to_path_buf(), false, Format::default());
 
-        let expected = dir.path().join("track03.wav");
+        let expected = dir.path().join("track03.flac");
         assert!(expected.exists());
-        let bytes = std::fs::read(&expected).unwrap();
-        assert_eq!(bytes.len(), 44 + 150 * FRAME_SIZE);
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
+        let file_bytes = std::fs::read(&expected).unwrap();
+        assert_eq!(&file_bytes[0..4], b"fLaC");
 
         let mut seen_started = false;
         let mut seen_done = false;
@@ -267,7 +282,7 @@ mod tests {
                     seen_done = true;
                     assert_eq!(*number, 3);
                     assert_eq!(path.as_path(), expected.as_path());
-                    assert_eq!(*bytes, (150 * FRAME_SIZE) as u64);
+                    assert_eq!(*bytes, file_bytes.len() as u64);
                 }
                 RipEvent::Finished {
                     failed,
@@ -293,11 +308,32 @@ mod tests {
     }
 
     #[test]
+    fn rips_a_demo_track_to_wav_when_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = run_job(vec![3], dir.path().to_path_buf(), false, Format::Wav);
+
+        let expected = dir.path().join("track03.wav");
+        assert!(expected.exists());
+        let bytes = std::fs::read(&expected).unwrap();
+        assert_eq!(bytes.len(), 44 + 150 * FRAME_SIZE);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+
+        assert!(matches!(
+            events
+                .iter()
+                .find(|e| matches!(e, RipEvent::TrackDone { .. })),
+            Some(RipEvent::TrackDone { number, bytes, .. })
+                if *number == 3 && *bytes == (44 + 150 * FRAME_SIZE) as u64
+        ));
+    }
+
+    #[test]
     fn skips_existing_output_without_force() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("track03.wav"), b"old").unwrap();
+        std::fs::write(dir.path().join("track03.flac"), b"old").unwrap();
 
-        let events = run_job(vec![3], dir.path().to_path_buf(), false);
+        let events = run_job(vec![3], dir.path().to_path_buf(), false, Format::default());
 
         assert!(
             events
@@ -309,7 +345,7 @@ mod tests {
             Some(RipEvent::Finished { failed: 0, .. })
         ));
         assert_eq!(
-            std::fs::read(dir.path().join("track03.wav")).unwrap(),
+            std::fs::read(dir.path().join("track03.flac")).unwrap(),
             b"old"
         );
     }
@@ -317,25 +353,23 @@ mod tests {
     #[test]
     fn force_overwrites_existing_output() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("track03.wav"), b"old").unwrap();
+        std::fs::write(dir.path().join("track03.flac"), b"old").unwrap();
 
-        let events = run_job(vec![3], dir.path().to_path_buf(), true);
+        let events = run_job(vec![3], dir.path().to_path_buf(), true, Format::default());
 
         assert!(
             events
                 .iter()
                 .any(|e| matches!(e, RipEvent::TrackDone { number: 3, .. }))
         );
-        assert_eq!(
-            std::fs::read(dir.path().join("track03.wav")).unwrap().len(),
-            44 + 150 * FRAME_SIZE
-        );
+        let bytes = std::fs::read(dir.path().join("track03.flac")).unwrap();
+        assert_eq!(&bytes[0..4], b"fLaC");
     }
 
     #[test]
     fn unknown_track_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let events = run_job(vec![9], dir.path().to_path_buf(), false);
+        let events = run_job(vec![9], dir.path().to_path_buf(), false, Format::default());
 
         assert!(
             events

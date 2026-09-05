@@ -68,6 +68,31 @@ fn rip_with_two_missing_devices_fails_cleanly() {
 }
 
 #[test]
+fn rip_rejects_unknown_format() {
+    bin()
+        .args(["rip", "--format", "mp3"])
+        .assert()
+        .code(2)
+        .stderr(contains("unknown format 'mp3'"));
+}
+
+#[test]
+fn rip_accepts_wav_format() {
+    // `--format wav` parses; with a missing device it fails on the device.
+    bin()
+        .args([
+            "rip",
+            "-d",
+            "/dev/sr-definitely-not-there",
+            "--format",
+            "wav",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("device /dev/sr-definitely-not-there not found"));
+}
+
+#[test]
 fn rip_accepts_all_flag() {
     // `--all` is accepted as a flag; with no hardware it reports no devices.
     bin()

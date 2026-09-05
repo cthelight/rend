@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 rend-core = { path = "../core" }
+rend-encode = { path = "../encode" }
 clap = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

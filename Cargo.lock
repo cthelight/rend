@@ -608,6 +608,7 @@ dependencies = [
  "clap",
  "predicates",
  "rend-core",
+ "rend-encode",
  "tempfile",
  "thiserror",
 ]
@@ -617,8 +618,14 @@ name = "rend-core"
 version = "0.1.0"
 dependencies = [
  "libc",
- "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "rend-encode"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -629,6 +636,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "rend-core",
+ "rend-encode",
  "tempfile",
 ]
 

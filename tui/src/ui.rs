@@ -190,7 +190,11 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .unwrap_or(app.out_dir.as_path())
         .display()
         .to_string();
-    let title = format!(" Ripping to {} · {force} ", out_display);
+    let title = format!(
+        " Ripping to {} · {} · {force} ",
+        out_display,
+        app.format.label()
+    );
     let block = Block::bordered()
         .border_style(Style::default().fg(Color::DarkGray))
         .title(title);
@@ -296,11 +300,11 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let (right, color) = match &app.status {
         Some(status) => (format!(" {status} "), Color::Yellow),
         None if app.drive_ripping(app.drive_sel) => (
-            " [s] stop   [f] force   [q] quit ".to_string(),
+            " [s] stop   [o] format   [f] force   [q] quit ".to_string(),
             Color::Gray,
         ),
         None => (
-            " [↑↓] move · [tab] focus · [enter] activate · [r] rip · [a] all · [e] eject · [f] force · [q] quit "
+            " [↑↓] move · [tab] focus · [enter] activate · [r] rip · [a] all · [e] eject · [o] format · [f] force · [q] quit "
                 .to_string(),
             Color::Gray,
         ),

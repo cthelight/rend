@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
+use rend_encode::{Format, ffmpeg_available};
 
 use crate::demo::{DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource};
 use crate::rip::{self, RipEvent, RipJob, RipSource};
@@ -291,6 +292,8 @@ pub struct App {
     pub tracks_scroll: usize,
     /// Rips keyed by drive index; several drives can rip at once.
     rips: HashMap<usize, DriveRip>,
+    /// The format new rips write in.
+    pub format: Format,
     pub force: bool,
     pub status: Option<String>,
     pub out_dir: PathBuf,
@@ -301,7 +304,13 @@ pub struct App {
 
 impl App {
     /// Creates the app, discovering drives (or the simulated drive).
-    pub fn new(device: Option<&str>, out_dir: PathBuf, force: bool, demo: bool) -> Self {
+    pub fn new(
+        device: Option<&str>,
+        out_dir: PathBuf,
+        force: bool,
+        format: Format,
+        demo: bool,
+    ) -> Self {
         let mut app = Self {
             running: true,
             focus: Focus::Drives,
@@ -313,6 +322,7 @@ impl App {
             track_sel: 0,
             tracks_scroll: 0,
             rips: HashMap::new(),
+            format,
             force,
             status: None,
             out_dir,
@@ -393,6 +403,10 @@ impl App {
                     "force (overwrite) {}",
                     if self.force { "on" } else { "off" }
                 ));
+            }
+            KeyCode::Char('o') => {
+                self.format = self.format.next();
+                self.status = Some(format!("output format: {}", self.format.label()));
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
@@ -711,6 +725,11 @@ impl App {
             self.status = Some("a rip is already running on this drive".into());
             return;
         }
+        if self.format.requires_ffmpeg() && !ffmpeg_available() {
+            self.status =
+                Some("ffmpeg not found in PATH — install it, or switch to wav with o".into());
+            return;
+        }
         let Some(toc) = self.toc.clone() else {
             return;
         };
@@ -743,6 +762,7 @@ impl App {
             toc: toc.clone(),
             tracks,
             out_dir: out_dir.clone(),
+            format: self.format,
             force: self.force,
             stop: stop.clone(),
         };
@@ -842,7 +862,7 @@ mod tests {
     use rend_core::FRAME_SIZE;
 
     fn demo_app(dir: &std::path::Path) -> App {
-        App::new(None, dir.to_path_buf(), false, true)
+        App::new(None, dir.to_path_buf(), false, Format::default(), true)
     }
 
     fn drain_until_finished(app: &mut App, timeout: Duration) {
@@ -894,12 +914,11 @@ mod tests {
         drain_until_finished(&mut app, Duration::from_secs(10));
 
         let state = app.selected_rip_state().unwrap();
-        assert!(matches!(
-            &state.states[2],
-            TrackState::Done { bytes } if *bytes == (150 * FRAME_SIZE) as u64
-        ));
+        assert!(matches!(&state.states[2], TrackState::Done { .. }));
         assert!(state.summary.is_some());
-        assert!(dir.path().join("track03.wav").exists());
+        let flac = dir.path().join("track03.flac");
+        let bytes = std::fs::read(&flac).unwrap();
+        assert_eq!(&bytes[0..4], b"fLaC");
     }
 
     #[test]
@@ -929,14 +948,14 @@ mod tests {
 
         assert!(!app.any_rip_active());
         // With two drives present, each wrote into its own per-drive subdir.
-        assert!(dir.path().join("sr-demo/track03.wav").exists());
-        assert!(dir.path().join("sr-demo2/track03.wav").exists());
+        assert!(dir.path().join("sr-demo/track03.flac").exists());
+        assert!(dir.path().join("sr-demo2/track03.flac").exists());
     }
 
     #[test]
     fn skips_existing_output_without_force() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("track03.wav"), b"old").unwrap();
+        std::fs::write(dir.path().join("track03.flac"), b"old").unwrap();
         let mut app = demo_app(dir.path());
         app.track_sel = 2;
         app.rip_selected_track();
@@ -947,7 +966,7 @@ mod tests {
             TrackState::Skipped(_)
         ));
         assert_eq!(
-            std::fs::read(dir.path().join("track03.wav")).unwrap(),
+            std::fs::read(dir.path().join("track03.flac")).unwrap(),
             b"old"
         );
     }
@@ -961,6 +980,32 @@ mod tests {
         assert!(app.force);
         app.handle_key(key('f'));
         assert!(!app.force);
+    }
+
+    #[test]
+    fn format_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        assert_eq!(app.format, Format::Flac);
+        app.handle_key(key('o'));
+        assert_eq!(app.format, Format::Wav);
+        app.handle_key(key('o'));
+        assert_eq!(app.format, Format::Flac);
+    }
+
+    #[test]
+    fn rips_in_wav_format_when_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.format = Format::Wav;
+        app.track_sel = 2;
+        app.rip_selected_track();
+        drain_until_finished(&mut app, Duration::from_secs(10));
+
+        let wav = dir.path().join("track03.wav");
+        let bytes = std::fs::read(&wav).unwrap();
+        assert_eq!(bytes.len(), 44 + 150 * FRAME_SIZE);
+        assert_eq!(&bytes[0..4], b"RIFF");
     }
 
     #[test]
@@ -1043,7 +1088,7 @@ mod tests {
         assert!(app.drive_ripping(app.drive_sel));
         drain_until_finished(&mut app, Duration::from_secs(10));
         assert!(app.selected_rip_state().unwrap().summary.is_some());
-        assert!(dir.path().join("track03.wav").exists());
+        assert!(dir.path().join("track03.flac").exists());
     }
 
     #[test]

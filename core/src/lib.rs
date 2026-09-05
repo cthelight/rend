@@ -11,11 +11,9 @@ pub mod error;
 pub mod msf;
 pub mod sys;
 pub mod toc;
-pub mod wav;
 
 pub use audio::{AudioStatus, CddaStream, FRAME_SIZE, FRAMES_PER_SECOND, FrameSource, Subchannel};
 pub use device::{Device, DeviceInfo, DiscStatus, DriveStatus};
 pub use error::Error;
 pub use msf::Msf;
 pub use toc::{Toc, Track, TrackType};
-pub use wav::WavWriter;
