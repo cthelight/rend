@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 
 use rend_core::{CddaStream, Device, FRAME_SIZE, FRAMES_PER_SECOND, FrameSource, Toc, Track};
 use rend_encode::Format;
+use rend_meta::{DiscMeta, TrackTags, apply};
 
 use crate::demo::DemoSource;
 
@@ -76,6 +77,10 @@ pub struct RipJob {
     pub force: bool,
     /// Set to make the worker stop between chunks.
     pub stop: Arc<AtomicBool>,
+    /// The disc's looked-up metadata, to embed in the track files.
+    pub meta: Option<DiscMeta>,
+    /// The disc's cover art, if any, to embed in the track files.
+    pub cover: Option<Vec<u8>>,
 }
 
 /// Spawns the rip worker.
@@ -164,6 +169,10 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
     tx.send(RipEvent::TrackStarted { number }).ok();
     match read_track(&mut job.source, &spec, tx, &job.stop) {
         Ok(bytes) => {
+            tag_track(job, &spec);
+            let bytes = std::fs::metadata(&spec.path)
+                .map(|m| m.len())
+                .unwrap_or(bytes);
             tx.send(RipEvent::TrackDone {
                 number,
                 path: spec.path,
@@ -177,6 +186,27 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
             Err(e.to_string())
         }
     }
+}
+
+/// Embeds the looked-up metadata and cover art into a finished track file.
+/// Best effort: a tagging failure never fails the rip.
+fn tag_track(job: &RipJob, spec: &TrackSpec) {
+    let Some(disc) = &job.meta else {
+        return;
+    };
+    let total = job.toc.audio_tracks().count();
+    let Some(position) = job
+        .toc
+        .audio_tracks()
+        .position(|t| t.number == spec.number)
+        .map(|i| i + 1)
+    else {
+        return;
+    };
+    let Some(tags) = TrackTags::for_track(disc, position, total) else {
+        return;
+    };
+    let _ = apply(&spec.path, &tags, job.cover.as_deref());
 }
 
 fn read_track(
@@ -222,6 +252,9 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::Accessor;
+
     use crate::demo::DemoDisc;
 
     fn run_job(tracks: Vec<u8>, out_dir: PathBuf, force: bool, format: Format) -> Vec<RipEvent> {
@@ -234,6 +267,8 @@ mod tests {
             format,
             force,
             stop: Arc::new(AtomicBool::new(false)),
+            meta: None,
+            cover: None,
         };
         let handle = spawn(job, tx);
         let mut events = Vec::new();
@@ -326,6 +361,44 @@ mod tests {
             Some(RipEvent::TrackDone { number, bytes, .. })
                 if *number == 3 && *bytes == (44 + 150 * FRAME_SIZE) as u64
         ));
+    }
+
+    #[test]
+    fn tags_the_file_when_the_job_carrying_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let job = RipJob {
+            source: RipSource::Demo(DemoSource::with_delay(Duration::ZERO)),
+            toc: DemoDisc::new().toc,
+            tracks: vec![3],
+            out_dir: dir.path().to_path_buf(),
+            format: Format::default(),
+            force: false,
+            stop: Arc::new(AtomicBool::new(false)),
+            meta: Some(crate::demo::demo_meta()),
+            cover: Some(crate::demo::demo_cover()),
+        };
+        let handle = spawn(job, tx);
+        for _ in rx {}
+        handle.join().unwrap();
+
+        let path = dir.path().join("track03.flac");
+        let file = lofty::read_from_path(&path).unwrap();
+        let tag = file
+            .tag(lofty::tag::TagType::VorbisComments)
+            .expect("vorbis comments were written");
+        assert_eq!(
+            tag.title().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Short One")
+        );
+        assert_eq!(
+            tag.artist().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Guest Artist")
+        );
+        let pic = tag
+            .get_picture_type(lofty::picture::PictureType::CoverFront)
+            .unwrap();
+        assert_eq!(pic.data(), crate::demo::demo_cover());
     }
 
     #[test]

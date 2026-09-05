@@ -8,9 +8,11 @@ rust-version.workspace = true
 [dependencies]
 rend-core = { path = "../core" }
 rend-encode = { path = "../encode" }
+rend-meta = { path = "../meta" }
 clap = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 
 [dev-dependencies]
+lofty = { workspace = true }
 tempfile = { workspace = true }

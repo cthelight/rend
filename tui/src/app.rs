@@ -13,8 +13,9 @@ use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
 use rend_encode::{Format, ffmpeg_available};
+use rend_meta::{DiscMeta, cover_art, disc_id, lookup_disc};
 
-use crate::demo::{DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource};
+use crate::demo::{DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta};
 use crate::rip::{self, RipEvent, RipJob, RipSource};
 
 /// Which panel has keyboard focus.
@@ -265,6 +266,19 @@ fn drive_label(info: &DeviceInfo) -> String {
     label
 }
 
+/// The outcome of a background metadata lookup. `id` records which lookup
+/// produced it, so results from a previous disc can be discarded.
+enum MetaEvent {
+    /// The lookup succeeded.
+    Resolved {
+        id: u64,
+        meta: DiscMeta,
+        cover: Option<Vec<u8>>,
+    },
+    /// The lookup failed.
+    Failed { id: u64, reason: String },
+}
+
 /// Everything about the rip running (or last run) on a single drive: its
 /// per-track state plus the worker thread and stop flag that drive it.
 struct DriveRip {
@@ -288,6 +302,14 @@ pub struct App {
     pub drives_scroll: usize,
     pub toc: Option<Toc>,
     pub disc_id: Option<String>,
+    /// The looked-up metadata for the loaded disc, once resolved.
+    pub meta: Option<DiscMeta>,
+    /// The disc's cover art, once fetched.
+    cover: Option<Vec<u8>>,
+    /// Pending results from the metadata lookup worker.
+    meta_rx: Option<mpsc::Receiver<MetaEvent>>,
+    /// Generation counter invalidating in-flight lookups on disc changes.
+    meta_gen: u64,
     pub track_sel: usize,
     pub tracks_scroll: usize,
     /// Rips keyed by drive index; several drives can rip at once.
@@ -319,6 +341,10 @@ impl App {
             drives_scroll: 0,
             toc: None,
             disc_id: None,
+            meta: None,
+            cover: None,
+            meta_rx: None,
+            meta_gen: 0,
             track_sel: 0,
             tracks_scroll: 0,
             rips: HashMap::new(),
@@ -376,14 +402,97 @@ impl App {
         self.tracks_scroll = 0;
         self.toc = None;
         self.disc_id = None;
+        self.meta = None;
+        self.cover = None;
         match self.drives[idx].toc() {
             Ok(toc) => {
                 self.disc_id = self.drives[idx].mcn();
+                self.lookup_metadata(&toc);
                 self.toc = Some(toc);
                 self.focus = Focus::Tracks;
-                self.status = None;
             }
             Err(e) => self.status = Some(format!("no TOC: {e}")),
+        }
+    }
+
+    /// Starts looking up the disc's metadata: built in for the simulated
+    /// disc, on a background thread for a real one.
+    fn lookup_metadata(&mut self, toc: &Toc) {
+        let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
+        if lbas.is_empty() {
+            self.status = Some("no audio tracks to look up".into());
+            return;
+        }
+        if self.drives[self.drive_sel].is_demo() {
+            let meta = demo_meta();
+            let year = meta.year.as_deref().unwrap_or("");
+            self.status = Some(format!("{} — {} ({year})", meta.artist, meta.album));
+            self.meta = Some(meta);
+            self.cover = Some(demo_cover());
+            return;
+        }
+        let cddb_id = disc_id(&lbas);
+        let lookup_id = self.meta_gen + 1;
+        self.meta_gen = lookup_id;
+        self.status = Some("looking up metadata…".into());
+        let (tx, rx) = mpsc::channel();
+        self.meta_rx = Some(rx);
+        std::thread::Builder::new()
+            .name("rend-meta-lookup".into())
+            .spawn(move || {
+                let meta = match lookup_disc(&cddb_id) {
+                    Ok(meta) => meta,
+                    Err(e) => {
+                        let _ = tx.send(MetaEvent::Failed {
+                            id: lookup_id,
+                            reason: e.to_string(),
+                        });
+                        return;
+                    }
+                };
+                let cover = cover_art(&meta.release_id).ok().flatten();
+                let _ = tx.send(MetaEvent::Resolved {
+                    id: lookup_id,
+                    meta,
+                    cover,
+                });
+            })
+            .ok();
+    }
+
+    /// Applies pending metadata-lookup results for the selected disc.
+    pub fn drain_meta_events(&mut self) {
+        let Some(rx) = self.meta_rx.as_ref() else {
+            return;
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            match event {
+                MetaEvent::Resolved { id, meta, cover } => {
+                    if id != self.meta_gen {
+                        continue;
+                    }
+                    let year = meta
+                        .year
+                        .as_deref()
+                        .map(|y| format!(" ({y})"))
+                        .unwrap_or_default();
+                    self.status = Some(format!("{} — {}{year}", meta.artist, meta.album));
+                    self.meta = Some(meta);
+                    self.cover = cover;
+                    self.meta_rx = None;
+                }
+                MetaEvent::Failed { id, reason } => {
+                    if id != self.meta_gen {
+                        continue;
+                    }
+                    self.status = Some(format!("metadata lookup failed: {reason}"));
+                    self.meta_rx = None;
+                }
+            }
         }
     }
 
@@ -604,6 +713,9 @@ impl App {
         if changed {
             self.toc = None;
             self.disc_id = None;
+            self.meta = None;
+            self.cover = None;
+            self.meta_gen += 1;
             if let Some(rip) = self.rips.get_mut(&selected) {
                 rip.state.states.clear();
             }
@@ -713,6 +825,9 @@ impl App {
             Ok(()) => {
                 self.toc = None;
                 self.disc_id = None;
+                self.meta = None;
+                self.cover = None;
+                self.meta_gen += 1;
                 self.rips.remove(&idx);
                 self.status = Some(format!("ejecting {}", self.drives[idx].path));
             }
@@ -765,6 +880,8 @@ impl App {
             format: self.format,
             force: self.force,
             stop: stop.clone(),
+            meta: self.meta.clone(),
+            cover: self.cover.clone(),
         };
         let thread = rip::spawn(job, tx);
         let mut state = RipState::fresh(self.track_count());
@@ -859,7 +976,8 @@ fn track_index(toc: &Toc, number: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rend_core::FRAME_SIZE;
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::Accessor;
 
     fn demo_app(dir: &std::path::Path) -> App {
         App::new(None, dir.to_path_buf(), false, Format::default(), true)
@@ -902,6 +1020,11 @@ mod tests {
         let toc = app.toc.as_ref().unwrap();
         assert_eq!(toc.tracks.len(), 5);
         assert_eq!(app.disc_id.as_deref(), Some(DEMO_MCN));
+        // The simulated disc's metadata is available immediately, no network.
+        let meta = app.meta.as_ref().unwrap();
+        assert_eq!(meta.album, "Demo Album");
+        assert_eq!(meta.tracks.len(), 5);
+        assert!(app.cover.is_some());
     }
 
     #[test]
@@ -919,6 +1042,28 @@ mod tests {
         let flac = dir.path().join("track03.flac");
         let bytes = std::fs::read(&flac).unwrap();
         assert_eq!(&bytes[0..4], b"fLaC");
+
+        // The looked-up demo metadata was embedded into the file.
+        let file = lofty::read_from_path(&flac).unwrap();
+        let tag = file
+            .tag(lofty::tag::TagType::VorbisComments)
+            .expect("vorbis comments were written");
+        assert_eq!(
+            tag.title().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Short One")
+        );
+        assert_eq!(
+            tag.artist().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Guest Artist")
+        );
+        assert_eq!(
+            tag.album().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Demo Album")
+        );
+        let pic = tag
+            .get_picture_type(lofty::picture::PictureType::CoverFront)
+            .unwrap();
+        assert_eq!(pic.data(), demo_cover());
     }
 
     #[test]
@@ -1004,8 +1149,18 @@ mod tests {
 
         let wav = dir.path().join("track03.wav");
         let bytes = std::fs::read(&wav).unwrap();
-        assert_eq!(bytes.len(), 44 + 150 * FRAME_SIZE);
+        // A RIFF container whose ID3v2 tag rides in a trailing `ID3 ` chunk.
         assert_eq!(&bytes[0..4], b"RIFF");
+        assert!(bytes.windows(4).any(|w| w == b"ID3 "));
+
+        let file = lofty::read_from_path(&wav).unwrap();
+        let tag = file
+            .tag(lofty::tag::TagType::Id3v2)
+            .expect("an ID3v2 tag was written");
+        assert_eq!(
+            tag.title().map(std::borrow::Cow::into_owned).as_deref(),
+            Some("Short One")
+        );
     }
 
     #[test]

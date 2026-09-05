@@ -119,3 +119,31 @@ fn eject_with_missing_device_fails_cleanly() {
         .failure()
         .stderr(contains("device /dev/sr-definitely-not-there not found"));
 }
+
+#[test]
+fn rip_accepts_no_metadata_flag() {
+    // `--no-metadata` parses; with a missing device it fails on the device.
+    bin()
+        .args(["rip", "-d", "/dev/sr-definitely-not-there", "--no-metadata"])
+        .assert()
+        .failure()
+        .stderr(contains("device /dev/sr-definitely-not-there not found"));
+}
+
+#[test]
+fn info_is_a_known_subcommand() {
+    bin()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("info"));
+}
+
+#[test]
+fn info_with_missing_device_fails_cleanly() {
+    bin()
+        .args(["info", "-d", "/dev/sr-definitely-not-there"])
+        .assert()
+        .failure()
+        .stderr(contains("device /dev/sr-definitely-not-there not found"));
+}

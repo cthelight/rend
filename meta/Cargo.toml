@@ -1,0 +1,17 @@
+[package]
+name = "rend-meta"
+description = "Disc metadata for rend: MusicBrainz lookup and tag writing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lofty.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+rend-encode = { path = "../encode" }
+tempfile.workspace = true

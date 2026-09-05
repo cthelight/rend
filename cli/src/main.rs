@@ -5,8 +5,9 @@ use std::result::Result;
 use std::thread;
 
 use clap::Parser;
-use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Track};
+use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Toc, Track};
 use rend_encode::{Format, ffmpeg_available};
+use rend_meta::{DiscMeta, TrackTags, apply, cover_art, disc_id, lookup_disc};
 
 #[derive(Parser)]
 #[command(name = "rend", version, about = "Rip audio CDs from the command line")]
@@ -42,7 +43,12 @@ enum Command {
         /// Rip every discovered drive in parallel.
         #[arg(long)]
         all: bool,
+        /// Skip looking up and embedding the disc's metadata.
+        #[arg(long)]
+        no_metadata: bool,
     },
+    /// Look up and show the disc's metadata (album, artist, tracks).
+    Info,
     /// Eject the disc.
     Eject,
 }
@@ -68,7 +74,17 @@ fn run(cli: Cli) -> Result<(), Error> {
             tracks,
             force,
             all,
-        } => cmd_rip(&cli.devices, all, &output_dir, format, &tracks, force),
+            no_metadata,
+        } => cmd_rip(
+            &cli.devices,
+            all,
+            &output_dir,
+            format,
+            &tracks,
+            force,
+            no_metadata,
+        ),
+        Command::Info => cmd_info(single_device(&cli.devices)?),
         Command::Eject => cmd_eject(single_device(&cli.devices)?),
     }
 }
@@ -167,6 +183,50 @@ fn cmd_toc(device: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
+fn cmd_info(device: Option<&str>) -> Result<(), Error> {
+    let dev = open_device(device)?;
+    let toc = dev.toc()?;
+    let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
+    if lbas.is_empty() {
+        return Err(Error::NoAudioTracks {
+            path: dev.path().into(),
+        });
+    }
+    let id = disc_id(&lbas);
+    let disc = match lookup_disc(&id) {
+        Ok(disc) => disc,
+        Err(rend_meta::lookup::Error::NotFound) => {
+            return Err(Error::Unexpected(format!(
+                "no release matched disc {id} (is it a commercial disc?)"
+            )));
+        }
+        Err(e) => return Err(Error::Unexpected(format!("metadata lookup failed: {e}"))),
+    };
+
+    println!("disc id    {id}");
+    println!("album      {}", disc.album);
+    println!("artist     {}", disc.artist);
+    if let Some(year) = &disc.year {
+        println!("year       {year}");
+    }
+    println!("release id {}", disc.release_id);
+    println!();
+    for (i, t) in disc.tracks.iter().enumerate() {
+        let artist = t.artist.as_deref().unwrap_or(&disc.artist);
+        println!("track {:>2}  {:<30} {}", i + 1, t.title, artist);
+    }
+    Ok(())
+}
+
+/// The options shared by a drive's rip worker and its per-track rips.
+struct RipOptions {
+    format: Format,
+    force: bool,
+    no_metadata: bool,
+    prefix: String,
+    progress: bool,
+}
+
 fn cmd_rip(
     devices: &[String],
     all: bool,
@@ -174,6 +234,7 @@ fn cmd_rip(
     format: Format,
     only: &[u8],
     force: bool,
+    no_metadata: bool,
 ) -> Result<(), Error> {
     if format.requires_ffmpeg() && !ffmpeg_available() {
         return Err(Error::Unexpected(
@@ -186,7 +247,7 @@ fn cmd_rip(
     // One drive keeps the flat layout; several get a subdirectory each, named
     // after the device (e.g. `sr0`), so track files never collide.
     let multi = resolved.len() > 1;
-    let jobs: Vec<(Device, PathBuf, String)> = resolved
+    let jobs: Vec<(Device, PathBuf, RipOptions)> = resolved
         .into_iter()
         .map(|dev| {
             let base = dev
@@ -205,19 +266,25 @@ fn cmd_rip(
             } else {
                 String::new()
             };
-            (dev, dir, prefix)
+            let opts = RipOptions {
+                format,
+                force,
+                no_metadata,
+                prefix,
+                progress: !multi,
+            };
+            (dev, dir, opts)
         })
         .collect();
 
     // One worker thread per drive; they all run at the same time.
     let mut handles = Vec::new();
-    for (dev, dir, prefix) in jobs {
+    for (dev, dir, opts) in jobs {
         let only = only.to_vec();
-        let progress = !multi;
         let path = dev.path().to_string();
         let handle = thread::Builder::new()
             .name(format!("rend-rip-{path}"))
-            .spawn(move || rip_device(dev, &dir, &only, format, force, &prefix, progress))
+            .spawn(move || rip_device(dev, &dir, &only, &opts))
             .map_err(|e| Error::Unexpected(format!("failed to spawn rip thread: {e}")))?;
         handles.push((path, handle));
     }
@@ -260,11 +327,9 @@ fn rip_device(
     mut dev: Device,
     out_dir: &Path,
     only: &[u8],
-    format: Format,
-    force: bool,
-    prefix: &str,
-    progress: bool,
+    opts: &RipOptions,
 ) -> Result<(usize, usize), Error> {
+    let prefix = opts.prefix.as_str();
     dev.require_disc()?;
     let toc = dev.toc()?;
 
@@ -296,6 +361,13 @@ fn rip_device(
         });
     }
 
+    let total_audio = toc.audio_tracks().count();
+    let metadata = if opts.no_metadata {
+        None
+    } else {
+        lookup_metadata(&toc, prefix)
+    };
+
     std::fs::create_dir_all(out_dir)?;
     dev.spin_up().ok();
 
@@ -303,9 +375,13 @@ fn rip_device(
     for track in &selected {
         let end = toc.end_lba(track.number).unwrap_or(toc.leadout_lba);
         let frames = track.frames(end);
-        let path = out_dir.join(format!("track{:02}.{}", track.number, format.extension()));
+        let path = out_dir.join(format!(
+            "track{:02}.{}",
+            track.number,
+            opts.format.extension()
+        ));
 
-        if path.exists() && !force {
+        if path.exists() && !opts.force {
             eprintln!(
                 "{prefix}{} already exists (use --force to overwrite)",
                 path.display()
@@ -314,12 +390,17 @@ fn rip_device(
             continue;
         }
 
-        match rip_track(&mut dev, track, frames, &path, format, prefix, progress) {
-            Ok(()) => eprintln!(
-                "{prefix}track {:02}: wrote {}",
-                track.number,
-                path.display()
-            ),
+        match rip_track(&mut dev, track, frames, &path, opts) {
+            Ok(()) => {
+                eprintln!(
+                    "{prefix}track {:02}: wrote {}",
+                    track.number,
+                    path.display()
+                );
+                if let Some((disc, art)) = &metadata {
+                    tag_track(&toc, &path, disc, art, track.number, total_audio, prefix);
+                }
+            }
             Err(e) => {
                 std::fs::remove_file(&path).ok();
                 eprintln!("{prefix}track {:02}: {e}", track.number);
@@ -333,19 +414,19 @@ fn rip_device(
 }
 
 /// Rips a single track to an output file in the given format, reporting
-/// progress on stderr when `progress` is set (only safe for a single drive —
-/// parallel drives would clobber each other's `\r` progress line).
+/// progress on stderr when enabled (only safe for a single drive — parallel
+/// drives would clobber each other's `\r` progress line).
 fn rip_track(
     dev: &mut Device,
     track: &Track,
     frames: u32,
     path: &Path,
-    format: Format,
-    prefix: &str,
-    progress: bool,
+    opts: &RipOptions,
 ) -> io::Result<()> {
+    let prefix = opts.prefix.as_str();
+    let progress = opts.progress;
     let mut stream = CddaStream::new(dev, track.start_lba, frames);
-    let mut file = format.create_file(path)?;
+    let mut file = opts.format.create_file(path)?;
     let total = stream.total_bytes();
     let mut buf = vec![0u8; FRAMES_PER_SECOND as usize * FRAME_SIZE];
     let mut done = 0u64;
@@ -372,6 +453,71 @@ fn rip_track(
     file.finish()
 }
 
+/// Looks up the disc's metadata and cover art for the given TOC.
+///
+/// Any failure (no match, no network, …) is reported as a warning and yields
+/// `None`, since a missing lookup must not stop a rip.
+fn lookup_metadata(toc: &Toc, prefix: &str) -> Option<(DiscMeta, Option<Vec<u8>>)> {
+    let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
+    if lbas.is_empty() {
+        return None;
+    }
+    let id = disc_id(&lbas);
+    let disc = match lookup_disc(&id) {
+        Ok(disc) => disc,
+        Err(e) => {
+            eprintln!("{prefix}metadata lookup failed: {e}");
+            return None;
+        }
+    };
+    let art = match cover_art(&disc.release_id) {
+        Ok(art) => art,
+        Err(e) => {
+            eprintln!("{prefix}cover art lookup failed: {e}");
+            None
+        }
+    };
+    eprintln!(
+        "{prefix}{} — {}{}",
+        disc.artist,
+        disc.album,
+        disc.year
+            .as_deref()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default()
+    );
+    Some((disc, art))
+}
+
+/// Applies the looked-up metadata to one ripped track file, warning (rather
+/// than failing) if the tags cannot be written.
+fn tag_track(
+    toc: &Toc,
+    path: &Path,
+    disc: &DiscMeta,
+    art: &Option<Vec<u8>>,
+    number: u8,
+    total: usize,
+    prefix: &str,
+) {
+    let Some(position) = track_position(toc, number) else {
+        return;
+    };
+    let Some(tags) = TrackTags::for_track(disc, position, total) else {
+        return;
+    };
+    if let Err(e) = apply(path, &tags, art.as_deref()) {
+        eprintln!("{prefix}track {number:02}: warning: could not write tags: {e}");
+    }
+}
+
+/// The 1-based position of the given track number among the disc's audio tracks.
+fn track_position(toc: &Toc, number: u8) -> Option<usize> {
+    toc.audio_tracks()
+        .position(|t| t.number == number)
+        .map(|i| i + 1)
+}
+
 fn cmd_eject(device: Option<&str>) -> Result<(), Error> {
     let dev = open_device(device)?;
     dev.eject()?;
@@ -388,6 +534,7 @@ fn fmt_duration(frames: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rend_core::TrackType;
 
     #[test]
     fn duration_format() {
@@ -403,5 +550,34 @@ mod tests {
 
         let two = ["/dev/sr0".to_string(), "/dev/sr1".to_string()];
         assert!(single_device(&two).is_err());
+    }
+
+    #[test]
+    fn track_position_is_one_based_among_audio_tracks() {
+        // Track 2 is a data track, so the audio tracks are numbered 1 and 3.
+        let toc = Toc {
+            tracks: vec![
+                Track {
+                    number: 1,
+                    kind: TrackType::Audio,
+                    start_lba: 0,
+                },
+                Track {
+                    number: 2,
+                    kind: TrackType::Data,
+                    start_lba: 1_000,
+                },
+                Track {
+                    number: 3,
+                    kind: TrackType::Audio,
+                    start_lba: 2_000,
+                },
+            ],
+            leadout_lba: 3_000,
+        };
+        assert_eq!(track_position(&toc, 1), Some(1));
+        assert_eq!(track_position(&toc, 3), Some(2));
+        assert_eq!(track_position(&toc, 2), None);
+        assert_eq!(track_position(&toc, 9), None);
     }
 }

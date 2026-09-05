@@ -9,6 +9,7 @@ around the Linux `cdrom` ioctl interface.
 
 - `core/` — `rend-core`: device discovery, TOC, CDDA audio reading
 - `encode/` — `rend-encode`: output formats (FLAC via ffmpeg, WAV)
+- `meta/` — `rend-meta`: MusicBrainz disc lookup and tag writing (lofty)
 - `cli/` — `rend`: the command-line interface
 - `tui/` — `rend-tui`: an interactive TUI with mouse support
 
@@ -21,6 +22,8 @@ rend rip                       # rip all audio tracks to ./trackNN.flac
 rend rip -t 3 -t 5 -o ~/rips   # rip selected tracks to a directory
 rend rip -f                    # overwrite existing files
 rend rip -F wav                # output WAV instead of FLAC
+rend rip --no-metadata         # rip without looking up or tagging metadata
+rend info                      # look up and show the disc's metadata
 rend eject                     # eject the disc
 
 rend -d /dev/sr1 toc           # use a specific device (default: first found)
@@ -38,6 +41,18 @@ needs no external tools. The encode step lives in `rend-encode`, a
 self-contained layer so further formats can be added without touching the
 CLI or TUI. FLAC output requires `ffmpeg` on `PATH`; the CLI errors out
 with a clear message if it is missing and a FLAC rip is requested.
+
+### Metadata
+
+Before ripping, `rend` computes the disc's CDDB ID from the track lengths
+and looks the disc up on **MusicBrainz** (with cover art from the
+**Cover Art Archive**). The result is embedded into each track file: FLAC
+gets Vorbis comments plus a `PICTURE` block, WAV gets an ID3v2 tag. Title,
+artist, album, album artist, track number/total, and year are written when
+known. The lookup is best effort: without network access, or when the disc
+isn't found, the rip proceeds with no tags. Use `--no-metadata` to skip
+the lookup entirely, or `rend info` to see what would be applied without
+ripping anything.
 
 ### Ripping several drives in parallel
 
@@ -90,6 +105,12 @@ Keyboard:
 
 Mouse: click to select, double-click a track to rip it, scroll wheel to
 scroll the drives and TOC lists. Buttons can be clicked as well.
+
+When a disc's table of contents is loaded, the disc is looked up on
+MusicBrainz in the background; the TOC panel then shows the track titles
+and the panel header shows artist, album, and year. Ripped tracks carry
+the looked-up metadata and cover art, embedded the same way as in the CLI
+(best effort — a failed lookup never blocks a rip).
 
 When more than one drive is present, several can rip at the same time:
 each drive keeps its own rip state, so you can start a rip on one drive

@@ -108,6 +108,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
     let mut status_poll = Instant::now();
     while app.running {
         app.drain_rip_events();
+        app.drain_meta_events();
         if status_poll.elapsed() >= Duration::from_millis(1000) {
             status_poll = Instant::now();
             app.refresh_drives();

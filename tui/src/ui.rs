@@ -96,6 +96,14 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .get(app.drive_sel)
         .map(|d| d.path.as_str())
         .unwrap_or("?");
+    let meta = app.meta.as_ref().map(|m| {
+        let year = m
+            .year
+            .as_deref()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        format!(" · {} — {}{year}", m.artist, m.album)
+    });
     let title = match app.toc.as_ref() {
         Some(_) => {
             let id = app
@@ -103,7 +111,7 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
                 .as_deref()
                 .map(|s| format!(" · disc id {s}"))
                 .unwrap_or_default();
-            format!(" TOC — {path}{id} ")
+            format!(" TOC — {path}{id}{} ", meta.unwrap_or_default())
         }
         None => format!(" TOC — {path} (no disc) "),
     };
@@ -128,7 +136,16 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     let start = clamp_scroll(app.tracks_scroll, app.track_sel, toc.tracks.len(), visible);
     app.tracks_scroll = start;
 
-    let header = Row::new(vec!["#", "type", "start", "length", "state"]).style(
+    let titles: std::collections::HashMap<u8, &str> = match app.meta.as_ref() {
+        Some(meta) => toc
+            .audio_tracks()
+            .enumerate()
+            .filter_map(|(i, t)| meta.track(i + 1).map(|tm| (t.number, tm.title.as_str())))
+            .collect(),
+        None => std::collections::HashMap::new(),
+    };
+
+    let header = Row::new(vec!["#", "type", "start", "length", "title", "state"]).style(
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
@@ -160,6 +177,7 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
                 Cell::from(fmt_duration(
                     t.frames(toc.end_lba(t.number).unwrap_or(toc.leadout_lba)),
                 )),
+                Cell::from(titles.get(&t.number).copied().unwrap_or("—")),
                 Cell::from(Span::styled(text, Style::default().fg(color))),
             ])
             .style(style)
@@ -173,6 +191,7 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(8),
+            Constraint::Length(24),
             Constraint::Min(10),
         ],
     )

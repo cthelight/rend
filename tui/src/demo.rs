@@ -5,6 +5,7 @@ use std::io;
 use std::time::Duration;
 
 use rend_core::{FRAMES_PER_SECOND, FrameSource, Toc, Track, TrackType};
+use rend_meta::{DiscMeta, TrackMeta};
 
 /// Device path shown for the simulated drive.
 pub const DEMO_DEVICE: &str = "/dev/sr-demo";
@@ -75,6 +76,51 @@ impl DemoDisc {
     }
 }
 
+/// The metadata reported for the simulated disc, so the TUI can exercise
+/// the metadata flow without a network. One entry per audio track, in disc
+/// order; track 3 (the short one) has its own artist.
+pub fn demo_meta() -> DiscMeta {
+    DiscMeta {
+        album: "Demo Album".into(),
+        artist: "The Demo Band".into(),
+        year: Some("2024".into()),
+        release_id: "demo-release".into(),
+        tracks: vec![
+            TrackMeta {
+                title: "Intro".into(),
+                artist: None,
+            },
+            TrackMeta {
+                title: "First Track".into(),
+                artist: None,
+            },
+            TrackMeta {
+                title: "Short One".into(),
+                artist: Some("Guest Artist".into()),
+            },
+            TrackMeta {
+                title: "Interlude".into(),
+                artist: None,
+            },
+            TrackMeta {
+                title: "Outro".into(),
+                artist: None,
+            },
+        ],
+    }
+}
+
+/// A tiny 1x1 PNG used as the simulated disc's cover art.
+pub fn demo_cover() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x64,
+        0x60, 0xF8, 0x9F, 0x0F, 0x00, 0x02, 0x87, 0x01, 0x80, 0xEB, 0x47, 0xBA, 0x92, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]
+}
+
 /// A [`FrameSource`] producing a 440 Hz sine wave, so demo rips yield
 /// playable WAV files.
 #[derive(Debug)]
@@ -139,6 +185,14 @@ mod tests {
         }
         assert_eq!(toc.end_lba(5), Some(10500));
         assert_eq!(toc.frames_remaining(0), 10500);
+    }
+
+    #[test]
+    fn meta_matches_the_toc() {
+        let toc = DemoDisc::new().toc;
+        let meta = demo_meta();
+        assert_eq!(meta.tracks.len(), toc.audio_tracks().count());
+        assert!(demo_cover().starts_with(&[0x89, 0x50, 0x4E, 0x47]));
     }
 
     #[test]
