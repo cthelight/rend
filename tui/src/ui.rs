@@ -181,13 +181,22 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
                 .unwrap_or_default();
             format!(" TOC — {path}{id}{} ", meta.unwrap_or_default())
         }
-        None => format!(" TOC — {path} (no disc) "),
+        None => {
+            let state = if app.loading_toc {
+                "loading…"
+            } else {
+                "no disc"
+            };
+            format!(" TOC — {path} ({state}) ")
+        }
     };
     let block = panel_block(title, app.focus == Focus::Tracks);
 
     let Some(toc) = app.toc.as_ref() else {
         let msg = if app.drives.is_empty() {
             "no drive selected — try rend-tui --demo"
+        } else if app.loading_toc {
+            "reading the table of contents…"
         } else {
             "no disc in the selected drive"
         };

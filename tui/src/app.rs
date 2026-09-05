@@ -256,20 +256,6 @@ impl Drive {
         }
     }
 
-    fn toc(&self) -> Result<Toc, String> {
-        match &self.device {
-            Some(device) => device.toc().map_err(|e| e.to_string()),
-            None => Ok(DemoDisc::new().toc),
-        }
-    }
-
-    fn mcn(&self) -> Option<String> {
-        match &self.device {
-            Some(device) => device.mcn().ok().flatten(),
-            None => Some(DEMO_MCN.into()),
-        }
-    }
-
     fn eject(&self) -> Result<(), String> {
         match &self.device {
             Some(device) => device.eject().map_err(|e| e.to_string()),
@@ -295,6 +281,15 @@ fn drive_label(info: &DeviceInfo) -> String {
         label.push_str(&format!(" v{version}"));
     }
     label
+}
+
+/// Opens the drive and reads its table of contents and catalog number.
+/// Runs on the background TOC reader's thread.
+fn read_toc(path: &str) -> Result<(Toc, Option<String>), String> {
+    let device = Device::open(path).map_err(|e| e.to_string())?;
+    let toc = device.toc().map_err(|e| e.to_string())?;
+    let mcn = device.mcn().ok().flatten();
+    Ok((toc, mcn))
 }
 
 /// One editable line of the metadata editor: a label, its value, and the
@@ -391,9 +386,17 @@ pub struct MetaEdit {
     pub scroll: usize,
 }
 
-/// The outcome of a background metadata lookup. `id` records which lookup
-/// produced it, so results from a previous disc can be discarded.
+/// The outcome of a background read for the selected disc: its table of
+/// contents, its candidate metadata, or a candidate's cover art. `id`
+/// records which read produced it, so results from a previous disc can be
+/// discarded.
 enum MetaEvent {
+    /// The background table-of-contents read finished: the toc and the
+    /// disc's catalog number (when it has one), or the read's error.
+    TocRead {
+        id: u64,
+        result: Result<(Toc, Option<String>), String>,
+    },
     /// The candidate list arrived, best first. `toc` keys the answer in
     /// the cache when it lands.
     Candidates {
@@ -437,6 +440,9 @@ pub struct App {
     pub drive_sel: usize,
     pub drives_scroll: usize,
     pub toc: Option<Toc>,
+    /// `true` while the selected drive's table of contents is being read
+    /// in the background.
+    pub loading_toc: bool,
     pub disc_id: Option<String>,
     /// The looked-up candidate metadata for the loaded disc, best first.
     pub meta: Option<Vec<DiscMeta>>,
@@ -446,9 +452,10 @@ pub struct App {
     cover: Option<Vec<u8>>,
     /// The open metadata editor, if one is being edited.
     pub editing: Option<MetaEdit>,
-    /// Pending results from the metadata lookup workers.
+    /// Pending results from the background workers: the TOC reader, the
+    /// metadata lookup, and the cover fetcher.
     meta_rx: Option<mpsc::Receiver<MetaEvent>>,
-    /// The sender of the metadata lookup channel, for the cover worker.
+    /// The sender of the background worker channel, shared by all of them.
     meta_tx: Option<mpsc::Sender<MetaEvent>>,
     /// Generation counter invalidating in-flight lookups on disc changes.
     meta_gen: u64,
@@ -489,6 +496,7 @@ impl App {
             drive_sel: 0,
             drives_scroll: 0,
             toc: None,
+            loading_toc: false,
             disc_id: None,
             meta: None,
             meta_sel: 0,
@@ -555,12 +563,16 @@ impl App {
         self.load_disc();
     }
 
-    /// Reads the selected drive's table of contents and starts its metadata
-    /// lookup, replacing whatever the drive showed before.
+    /// Loads the selected drive's disc, replacing whatever the drive showed
+    /// before. The simulated disc is read immediately; a real drive's table
+    /// of contents is read on a background thread, so a slow drive (e.g. one
+    /// spinning up) never freezes the interface. The metadata lookup starts
+    /// once the table of contents arrives.
     fn load_disc(&mut self) {
         self.track_sel = 0;
         self.tracks_scroll = 0;
         self.toc = None;
+        self.loading_toc = false;
         self.disc_id = None;
         self.meta = None;
         self.meta_sel = 0;
@@ -568,15 +580,42 @@ impl App {
         self.editing = None;
         self.remember_album();
         let idx = self.drive_sel;
-        match self.drives[idx].toc() {
-            Ok(toc) => {
-                self.disc_id = self.drives[idx].mcn();
-                self.lookup_metadata(&toc);
-                self.toc = Some(toc);
-                self.focus = Focus::Tracks;
-            }
-            Err(e) => self.status = Some(format!("no TOC: {e}")),
+        if self.drives[idx].is_demo() {
+            let toc = DemoDisc::new().toc;
+            self.disc_id = Some(DEMO_MCN.into());
+            self.lookup_metadata(&toc);
+            self.toc = Some(toc);
+            self.focus = Focus::Tracks;
+        } else {
+            self.read_toc_in_background();
         }
+    }
+
+    /// Starts the background read of the selected drive's table of contents.
+    /// The outcome is applied when [`Self::drain_meta_events`] sees its
+    /// `TocRead` event; a newer selection invalidates the in-flight read.
+    fn read_toc_in_background(&mut self) {
+        let path = self.drives[self.drive_sel].path.clone();
+        self.meta_gen += 1;
+        let read_id = self.meta_gen;
+        if self.meta_tx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.meta_tx = Some(tx.clone());
+            self.meta_rx = Some(rx);
+        }
+        let tx = self.meta_tx.clone().unwrap();
+        self.loading_toc = true;
+        self.status = Some("reading table of contents…".into());
+        std::thread::Builder::new()
+            .name("rend-toc".into())
+            .spawn(move || {
+                let result = read_toc(&path);
+                let _ = tx.send(MetaEvent::TocRead {
+                    id: read_id,
+                    result,
+                });
+            })
+            .ok();
     }
 
     /// Forgets the loaded disc after the selected drive's state changed, so
@@ -584,6 +623,7 @@ impl App {
     fn invalidate_disc(&mut self) {
         let selected = self.drive_sel;
         self.toc = None;
+        self.loading_toc = false;
         self.disc_id = None;
         self.meta = None;
         self.meta_sel = 0;
@@ -696,6 +736,21 @@ impl App {
         }
         for event in events {
             match event {
+                MetaEvent::TocRead { id, result } => {
+                    if id != self.meta_gen {
+                        continue;
+                    }
+                    self.loading_toc = false;
+                    match result {
+                        Ok((toc, mcn)) => {
+                            self.disc_id = mcn;
+                            self.lookup_metadata(&toc);
+                            self.toc = Some(toc);
+                            self.focus = Focus::Tracks;
+                        }
+                        Err(e) => self.status = Some(format!("no TOC: {e}")),
+                    }
+                }
                 MetaEvent::Candidates {
                     id,
                     toc,
@@ -1405,6 +1460,7 @@ impl App {
         match self.drives[idx].eject() {
             Ok(()) => {
                 self.toc = None;
+                self.loading_toc = false;
                 self.disc_id = None;
                 self.meta = None;
                 self.meta_sel = 0;
@@ -1604,6 +1660,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         app.drain_rip_events();
+    }
+
+    /// Drains background worker events until `done` holds, panicking when
+    /// the timeout elapses.
+    fn pump_until(app: &mut App, timeout: Duration, done: impl Fn(&App) -> bool) {
+        let start = Instant::now();
+        while !done(app) {
+            app.drain_meta_events();
+            if start.elapsed() > timeout {
+                panic!("background work did not finish in time");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -2187,7 +2256,14 @@ mod tests {
             Template::default(),
             false,
         );
-        // Selected while empty: the TOC read failed.
+        // Selected while empty: the (asynchronous) TOC read failed.
+        pump_until(&mut app, Duration::from_secs(5), |app| {
+            app.toc.is_some()
+                || app
+                    .status
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("no TOC"))
+        });
         assert!(app.toc.is_none());
         assert!(
             app.status
@@ -2203,12 +2279,20 @@ mod tests {
         // The insertion was detected and the drive was re-read: the sentinel
         // was replaced by the (failed, hardware-less) TOC attempt, and the
         // drive row shows the disc.
+        pump_until(&mut app, Duration::from_secs(5), |app| {
+            app.toc.is_some()
+                || app
+                    .status
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("no TOC"))
+        });
         assert_ne!(app.status.as_deref(), Some("sentinel"));
         assert!(
             app.status
                 .as_deref()
                 .is_some_and(|s| s.starts_with("no TOC"))
         );
+        assert!(!app.loading_toc);
         assert_eq!(app.drives[0].status, "disc present");
     }
 
