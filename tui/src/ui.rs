@@ -235,7 +235,15 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     let pct = done * 100 / total.max(1);
     let label = if active {
         match current_track(rip, app) {
-            Some(n) => format!("track {n:02}  {pct}%"),
+            Some(n) => {
+                let count = app.rip_track_count().unwrap_or(0);
+                if count > 1 {
+                    // `{pct}` is the overall progress across the whole rip.
+                    format!("track {n:02}/{count:02}  {pct}%")
+                } else {
+                    format!("track {n:02}  {pct}%")
+                }
+            }
             None => "starting…".to_string(),
         }
     } else if let Some(summary) = rip.and_then(|s| s.summary.as_ref()) {

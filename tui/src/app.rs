@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
 
-use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
+use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
 use rend_encode::{Format, ffmpeg_available};
 use rend_meta::{DiscMeta, DiscToc, cover_art, lookup_disc};
 
@@ -109,41 +109,35 @@ impl RipState {
         }
     }
 
-    /// Total bytes written and expected across this rip.
-    pub fn totals(&self) -> (u64, u64) {
+    /// Raw PCM bytes written and expected across this rip.
+    ///
+    /// The total is fixed for the life of the rip (every track in the job),
+    /// and finished or skipped tracks count as fully done, so the progress
+    /// bar grows steadily to 100% without resetting between tracks.
+    pub fn totals(&self, toc: &Toc, tracks: &[u8]) -> (u64, u64) {
         let mut done = 0u64;
         let mut total = 0u64;
-        for state in &self.states {
-            match state {
-                TrackState::Ripping {
-                    bytes_done,
-                    bytes_total,
-                } => {
-                    done += bytes_done;
-                    total += bytes_total;
-                }
-                TrackState::Done { bytes } => {
-                    done += bytes;
-                    total += bytes;
-                }
-                _ => {}
-            }
+        for &number in tracks {
+            let Some(i) = track_index(toc, number) else {
+                continue;
+            };
+            let track = &toc.tracks[i];
+            let end = toc.end_lba(number).unwrap_or(toc.leadout_lba);
+            let pcm = track.frames(end) as u64 * FRAME_SIZE as u64;
+            total += pcm;
+            done += match self.states.get(i) {
+                Some(TrackState::Ripping { bytes_done, .. }) => *bytes_done,
+                Some(TrackState::Done { .. }) | Some(TrackState::Skipped(_)) => pcm,
+                _ => 0,
+            };
         }
         (done, total)
     }
 
     /// Recomputes the smoothed read speed from the newest progress sample.
-    pub fn update_speed(&mut self) {
+    pub fn update_speed(&mut self, toc: &Toc, tracks: &[u8]) {
         let now = Instant::now();
-        let done: u64 = self
-            .states
-            .iter()
-            .map(|s| match s {
-                TrackState::Ripping { bytes_done, .. } => *bytes_done,
-                TrackState::Done { bytes } => *bytes,
-                _ => 0,
-            })
-            .sum();
+        let (done, _) = self.totals(toc, tracks);
         if let Some((prev, when)) = self.sample {
             let dt = now.duration_since(when).as_secs_f64();
             if dt > 0.05 {
@@ -288,6 +282,8 @@ struct DriveRip {
     out_dir: PathBuf,
     /// The TOC the rip was started on, for mapping track numbers to indices.
     toc: Toc,
+    /// The track numbers this rip covers, for overall progress.
+    tracks: Vec<u8>,
     rx: Option<mpsc::Receiver<RipEvent>>,
     thread: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -640,7 +636,7 @@ impl App {
                                 };
                             }
                         }
-                        rip.state.update_speed();
+                        rip.state.update_speed(&rip.toc, &rip.tracks);
                     }
                     RipEvent::TrackDone {
                         number,
@@ -653,7 +649,7 @@ impl App {
                             }
                         }
                         self.status = Some(format!("track {number:02}: wrote {}", path.display()));
-                        rip.state.update_speed();
+                        rip.state.update_speed(&rip.toc, &rip.tracks);
                     }
                     RipEvent::TrackFailed { number, error } => {
                         if let Some(i) = track_index(&rip.toc, number) {
@@ -765,8 +761,13 @@ impl App {
     pub fn rip_totals(&self) -> (u64, u64) {
         self.rips
             .get(&self.drive_sel)
-            .map(|r| r.state.totals())
+            .map(|r| r.state.totals(&r.toc, &r.tracks))
             .unwrap_or((0, 0))
+    }
+
+    /// The number of tracks in the selected drive's rip job, if any.
+    pub fn rip_track_count(&self) -> Option<usize> {
+        self.rips.get(&self.drive_sel).map(|r| r.tracks.len())
     }
 
     /// The number of tracks currently loaded, if any.
@@ -878,7 +879,7 @@ impl App {
         let job = RipJob {
             source,
             toc: toc.clone(),
-            tracks,
+            tracks: tracks.clone(),
             out_dir: out_dir.clone(),
             format: self.format,
             force: self.force,
@@ -893,6 +894,7 @@ impl App {
             state,
             out_dir: out_dir.clone(),
             toc,
+            tracks,
             rx: Some(rx),
             thread: Some(thread),
             stop,
@@ -1292,5 +1294,45 @@ mod tests {
 
     fn key(code: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE)
+    }
+
+    /// The raw PCM size of a track, given the TOC.
+    fn pcm_of(toc: &Toc, number: u8) -> u64 {
+        let track = toc.track(number).unwrap();
+        let end = toc.end_lba(number).unwrap_or(toc.leadout_lba);
+        track.frames(end) as u64 * FRAME_SIZE as u64
+    }
+
+    #[test]
+    fn overall_progress_does_not_reset_between_tracks() {
+        let toc = DemoDisc::new().toc;
+        let tracks: Vec<u8> = toc.audio_tracks().map(|t| t.number).collect();
+        let job_total: u64 = tracks.iter().map(|&n| pcm_of(&toc, n)).sum();
+        let mut state = RipState::fresh(toc.tracks.len());
+
+        // Before anything is read, the whole job is already the denominator.
+        let (done, total) = state.totals(&toc, &tracks);
+        assert_eq!(done, 0);
+        assert_eq!(total, job_total);
+
+        // Track 1 finished, track 2 halfway: the bar sits past track 1's
+        // share of the whole job, not back near zero.
+        let (n1, n2) = (tracks[0], tracks[1]);
+        state.states[0] = TrackState::Done { bytes: 1234 };
+        state.states[1] = TrackState::Ripping {
+            bytes_done: pcm_of(&toc, n2) / 2,
+            bytes_total: pcm_of(&toc, n2),
+        };
+        let (done, total) = state.totals(&toc, &tracks);
+        // The total never changes as tracks start; done counts track 1 by
+        // its raw PCM length, not its (much smaller) output file size.
+        assert_eq!(total, job_total);
+        assert_eq!(done, pcm_of(&toc, n1) + pcm_of(&toc, n2) / 2);
+        assert!(done as f64 / total as f64 > 0.1);
+
+        // A skipped track counts as fully done, so it does not drag the bar.
+        state.states[0] = TrackState::Skipped("output exists".into());
+        let (done, _) = state.totals(&toc, &tracks);
+        assert_eq!(done, pcm_of(&toc, n1) + pcm_of(&toc, n2) / 2);
     }
 }
