@@ -88,7 +88,7 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
 
         if app.drive_ripping(i) {
             // A rip in progress turns the drive's name line into the rip's
-            // progress bar, keeping the name visible on top of it.
+            // progress bar, which fills over the name, keeping it readable.
             let (done, total) = app.rip_progress(i);
             let ratio = if total > 0 {
                 (done as f64 / total as f64).clamp(0.0, 1.0)
@@ -137,8 +137,10 @@ fn drive_name(d: &Drive, selected: bool, hovered: bool, width: usize) -> String 
     }
 }
 
-/// The drive's name line while its rip is running: the name, centered, over
-/// a hand-drawn progress bar so the drive stays identifiable.
+/// The drive's name line while its rip is running: the name, centered, with
+/// the progress bar filling over it. The characters the fill passes under
+/// take the bar's color as their background and a black foreground, so the
+/// name stays readable and the bar stays visible.
 fn rip_name_line(d: &Drive, selected: bool, ratio: f64, width: usize) -> Line<'static> {
     let marker = if selected { "●" } else { "○" };
     let name: String = format!("{marker} {} {}", d.path, d.label)
@@ -156,6 +158,9 @@ fn rip_name_line(d: &Drive, selected: bool, ratio: f64, width: usize) -> Line<'s
         .iter()
         .enumerate()
         .map(|(x, ch)| match ch {
+            Some(ch) if x < filled => {
+                Span::styled(ch.to_string(), Style::default().fg(Color::Black).bg(bar))
+            }
             Some(ch) => Span::raw(ch.to_string()),
             None if x < filled => Span::styled("█", Style::default().fg(bar)),
             None => Span::styled("░", Style::default().fg(Color::DarkGray)),
@@ -788,7 +793,6 @@ mod tests {
         app.track_sel = 2;
         app.rip_selected_track();
         assert!(app.drive_ripping(app.drive_sel));
-        // A short label leaves room for the bar around the name.
         app.drives[0].label = "CD".into();
 
         let lines = rendered_lines(&mut app);
@@ -805,12 +809,50 @@ mod tests {
             .chars()
             .take(DRIVES_WIDTH as usize)
             .collect();
-        // The name is still visible, over a hand-drawn progress bar.
+        // The name is still visible, with the progress bar filling over it.
         assert!(line.contains("/dev/sr-demo"));
         assert!(
             line.contains('█') || line.contains('░'),
             "no bar in: {line:?}"
         );
+    }
+
+    #[test]
+    fn the_progress_bar_fills_over_the_drive_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.drives[0].label = "CD".into();
+        let drive = &app.drives[0];
+        let width = 20usize;
+        let line = rip_name_line(drive, false, 0.5, width);
+        let spans: Vec<&Span> = line.spans.iter().collect();
+        assert_eq!(spans.len(), width);
+        let filled = (0.5 * width as f64).round() as usize;
+        for (x, span) in spans.iter().enumerate() {
+            let over_fill = x < filled;
+            let content = span.content.as_ref();
+            if content == "█" || content == "░" {
+                // Bar blocks only appear where the fill is.
+                assert_eq!(content == "█", over_fill, "column {x}");
+                continue;
+            }
+            // A name character: the fill shows through as its background…
+            assert_eq!(
+                span.style.bg,
+                over_fill.then_some(Color::Gray),
+                "column {x}"
+            );
+            // …and black keeps it readable over the bar.
+            assert_eq!(
+                span.style.fg,
+                over_fill.then_some(Color::Black),
+                "column {x}"
+            );
+        }
+        // The name spans both sides of the fill, so the bar is visible in
+        // the empty cells of the filled half and the unfilled half.
+        assert!(spans.iter().take(filled).any(|s| s.content.as_ref() == "█"));
+        assert!(spans.iter().skip(filled).any(|s| s.content.as_ref() == "░"));
     }
 
     #[test]
