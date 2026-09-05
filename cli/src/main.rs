@@ -7,7 +7,9 @@ use std::thread;
 use clap::Parser;
 use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Toc, Track};
 use rend_encode::{Format, ffmpeg_available};
-use rend_meta::{DiscMeta, DiscToc, TrackTags, apply, cover_art, disc_id, lookup_disc};
+use rend_meta::{
+    DiscMeta, DiscToc, TrackTags, apply, cover_art, disc_dir, disc_id, lookup_disc, track_path,
+};
 
 #[derive(Parser)]
 #[command(name = "rend", version, about = "Rip audio CDs from the command line")]
@@ -371,18 +373,37 @@ fn rip_device(
         lookup_metadata(&toc, prefix)
     };
 
-    std::fs::create_dir_all(out_dir)?;
+    // With looked-up metadata the tracks live under an artist subdirectory;
+    // without it they stay flat in the output dir.
+    let base_dir = match &metadata {
+        Some((disc, _)) => disc_dir(out_dir, disc),
+        None => out_dir.to_path_buf(),
+    };
+
+    std::fs::create_dir_all(&base_dir)?;
     dev.spin_up().ok();
 
     let mut failed = 0usize;
     for track in &selected {
         let end = toc.end_lba(track.number).unwrap_or(toc.leadout_lba);
         let frames = track.frames(end);
-        let path = out_dir.join(format!(
-            "track{:02}.{}",
-            track.number,
-            opts.format.extension()
-        ));
+        let path = match &metadata {
+            Some((disc, _)) => {
+                let position = track_position(&toc, track.number).unwrap_or(1);
+                track_path(
+                    out_dir,
+                    disc,
+                    track.number,
+                    position,
+                    opts.format.extension(),
+                )
+            }
+            None => out_dir.join(format!(
+                "track{:02}.{}",
+                track.number,
+                opts.format.extension()
+            )),
+        };
 
         if path.exists() && !opts.force {
             eprintln!(

@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 
 use rend_core::{CddaStream, Device, FRAME_SIZE, FRAMES_PER_SECOND, FrameSource, Toc, Track};
 use rend_encode::Format;
-use rend_meta::{DiscMeta, TrackTags, apply};
+use rend_meta::{DiscMeta, TrackTags, apply, track_path};
 
 use crate::demo::DemoSource;
 
@@ -133,15 +133,35 @@ struct TrackSpec {
 
 impl TrackSpec {
     fn new(job: &RipJob, track: &Track, frames: u32) -> Self {
-        Self {
-            number: track.number,
-            lba: track.start_lba,
-            frames,
-            path: job.out_dir.join(format!(
+        // With looked-up metadata the file is `<artist>/<NN> <title>`;
+        // without it the flat `trackNN` name is kept.
+        let path = match &job.meta {
+            Some(disc) => {
+                let position = job
+                    .toc
+                    .audio_tracks()
+                    .position(|t| t.number == track.number)
+                    .map(|i| i + 1)
+                    .unwrap_or(1);
+                track_path(
+                    &job.out_dir,
+                    disc,
+                    track.number,
+                    position,
+                    job.format.extension(),
+                )
+            }
+            None => job.out_dir.join(format!(
                 "track{:02}.{}",
                 track.number,
                 job.format.extension()
             )),
+        };
+        Self {
+            number: track.number,
+            lba: track.start_lba,
+            frames,
+            path,
             format: job.format,
         }
     }
@@ -164,7 +184,9 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
         return Ok(());
     }
 
-    std::fs::create_dir_all(&job.out_dir).map_err(|e| e.to_string())?;
+    if let Some(parent) = spec.path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
 
     tx.send(RipEvent::TrackStarted { number }).ok();
     match read_track(&mut job.source, &spec, tx, &job.stop) {
@@ -382,7 +404,7 @@ mod tests {
         for _ in rx {}
         handle.join().unwrap();
 
-        let path = dir.path().join("track03.flac");
+        let path = dir.path().join("The Demo Band/03 Short One.flac");
         let file = lofty::read_from_path(&path).unwrap();
         let tag = file
             .tag(lofty::tag::TagType::VorbisComments)

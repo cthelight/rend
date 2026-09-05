@@ -18,7 +18,7 @@ around the Linux `cdrom` ioctl interface.
 ```sh
 rend drives                    # list CD-ROM devices
 rend toc                       # show disc table of contents
-rend rip                       # rip all audio tracks to ./trackNN.flac
+rend rip                       # rip all audio tracks to ./<artist>/<NN> <title>.flac
 rend rip -t 3 -t 5 -o ~/rips   # rip selected tracks to a directory
 rend rip -f                    # overwrite existing files
 rend rip -F wav                # output WAV instead of FLAC
@@ -29,8 +29,12 @@ rend eject                     # eject the disc
 rend -d /dev/sr1 toc           # use a specific device (default: first found)
 ```
 
-Ripped files are named after the track number (`track01.flac`, ...).
-Progress is reported on stderr.
+Ripped files are named after the looked-up metadata when it is available:
+each track goes into a per-artist directory as `<NN> <title>.<ext>`
+(e.g. `~/rips/The Band/01 First Song.flac`). Characters an SMB share would
+reject (`< > : " / \ | ? *`, any quote, control characters) are replaced
+with `_`. When no metadata is found (or `--no-metadata` is passed), the
+flat `trackNN.<ext>` naming is used instead. Progress is reported on stderr.
 
 ### Output format
 
@@ -65,8 +69,9 @@ rend rip -d /dev/sr0 -d /dev/sr1   # rip exactly these drives, in parallel
 ```
 
 Each drive writes into its own subdirectory of the output path, named
-after the device (`~/rips/sr0/track01.flac`, `~/rips/sr1/track01.flac`), so
-track numbers never collide. Log lines are prefixed with the device
+after the device (`~/rips/sr0/<artist>/01 <title>.flac`,
+`~/rips/sr1/<artist>/01 <title>.flac`), so tracks from different drives
+never collide. Log lines are prefixed with the device
 (`[sr0] …`). With a single drive the output stays flat and live progress
 is shown, as before.
 

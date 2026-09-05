@@ -1042,7 +1042,7 @@ mod tests {
         let state = app.selected_rip_state().unwrap();
         assert!(matches!(&state.states[2], TrackState::Done { .. }));
         assert!(state.summary.is_some());
-        let flac = dir.path().join("track03.flac");
+        let flac = dir.path().join("The Demo Band/03 Short One.flac");
         let bytes = std::fs::read(&flac).unwrap();
         assert_eq!(&bytes[0..4], b"fLaC");
 
@@ -1095,15 +1095,26 @@ mod tests {
         drain_all_until_idle(&mut app, Duration::from_secs(15));
 
         assert!(!app.any_rip_active());
-        // With two drives present, each wrote into its own per-drive subdir.
-        assert!(dir.path().join("sr-demo/track03.flac").exists());
-        assert!(dir.path().join("sr-demo2/track03.flac").exists());
+        // With two drives present, each wrote into its own per-drive subdir,
+        // and the tracks live under the looked-up artist directory.
+        assert!(
+            dir.path()
+                .join("sr-demo/The Demo Band/03 Short One.flac")
+                .exists()
+        );
+        assert!(
+            dir.path()
+                .join("sr-demo2/The Demo Band/03 Short One.flac")
+                .exists()
+        );
     }
 
     #[test]
     fn skips_existing_output_without_force() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("track03.flac"), b"old").unwrap();
+        let existing = dir.path().join("The Demo Band/03 Short One.flac");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"old").unwrap();
         let mut app = demo_app(dir.path());
         app.track_sel = 2;
         app.rip_selected_track();
@@ -1113,10 +1124,7 @@ mod tests {
             app.selected_rip_state().unwrap().states[2],
             TrackState::Skipped(_)
         ));
-        assert_eq!(
-            std::fs::read(dir.path().join("track03.flac")).unwrap(),
-            b"old"
-        );
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old");
     }
 
     #[test]
@@ -1150,7 +1158,7 @@ mod tests {
         app.rip_selected_track();
         drain_until_finished(&mut app, Duration::from_secs(10));
 
-        let wav = dir.path().join("track03.wav");
+        let wav = dir.path().join("The Demo Band/03 Short One.wav");
         let bytes = std::fs::read(&wav).unwrap();
         // A RIFF container whose ID3v2 tag rides in a trailing `ID3 ` chunk.
         assert_eq!(&bytes[0..4], b"RIFF");
@@ -1246,7 +1254,7 @@ mod tests {
         assert!(app.drive_ripping(app.drive_sel));
         drain_until_finished(&mut app, Duration::from_secs(10));
         assert!(app.selected_rip_state().unwrap().summary.is_some());
-        assert!(dir.path().join("track03.flac").exists());
+        assert!(dir.path().join("The Demo Band/03 Short One.flac").exists());
     }
 
     #[test]

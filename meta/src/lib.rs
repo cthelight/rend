@@ -4,12 +4,15 @@
 //! is — [`disc_id`] computes the CDDB id, [`lookup_disc`] submits the
 //! disc's layout to MusicBrainz (exact disc id first, then a fuzzy
 //! duration match), and [`cover_art`] fetches the release's front cover —
-//! and writes the result into the encoded audio files with [`apply`].
+//! names the output files after the result ([`track_path`]), and writes it
+//! into the encoded audio files with [`apply`].
 
 pub mod discid;
 pub mod lookup;
+pub mod naming;
 pub mod tag;
 
 pub use discid::{disc_id, mb_discid};
 pub use lookup::{DiscMeta, DiscToc, TrackMeta, cover_art, lookup_disc};
+pub use naming::{disc_dir, sanitize, track_filename, track_path};
 pub use tag::{TrackTags, apply};
