@@ -5,6 +5,11 @@ Rip audio CDs from the command line or in an interactive TUI.
 A Rust terminal application built on `rend-core`, a low-level wrapper
 around the Linux `cdrom` ioctl interface.
 
+> [!NOTE]
+> Install `ffmpeg` for the best results: the default output is FLAC,
+> which is encoded with it. Without `ffmpeg`, rip with `-F wav` — WAV
+> needs no external tools.
+
 ## Layout
 
 - `core/` — `rend-core`: device discovery, TOC, CDDA audio reading
