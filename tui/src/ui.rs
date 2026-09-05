@@ -344,19 +344,21 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
             fmt_bytes(total),
         )
     } else {
-        "  select a track and press r, or a for all audio tracks".to_string()
+        "  select a track to rip it, or rip all the audio tracks".to_string()
     };
     f.render_widget(
         Paragraph::new(stats).style(Style::default().fg(Color::Gray)),
         rows[1],
     );
 
+    // The buttons are clickable, so they carry no keybind hints; the keys
+    // still work and are listed in the help window (`?`).
     let btns = Layout::horizontal([
-        Constraint::Length(18),
         Constraint::Length(14),
-        Constraint::Length(10),
-        Constraint::Length(12),
-        Constraint::Length(12),
+        Constraint::Length(9),
+        Constraint::Length(6),
+        Constraint::Length(7),
+        Constraint::Length(6),
     ])
     .split(rows[2]);
 
@@ -365,32 +367,14 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     draw_button(
         f,
         btns[0],
-        "[r] rip selected",
+        "rip selected",
         can_rip,
         app.hover == Hover::RipSelected,
     );
-    draw_button(
-        f,
-        btns[1],
-        "[a] rip all",
-        can_rip,
-        app.hover == Hover::RipAll,
-    );
-    draw_button(
-        f,
-        btns[2],
-        "[t] tags",
-        can_rip,
-        app.hover == Hover::EditTags,
-    );
-    draw_button(
-        f,
-        btns[3],
-        "[e] eject",
-        can_eject,
-        app.hover == Hover::Eject,
-    );
-    draw_button(f, btns[4], "[s] stop", active, app.hover == Hover::Stop);
+    draw_button(f, btns[1], "rip all", can_rip, app.hover == Hover::RipAll);
+    draw_button(f, btns[2], "tags", can_rip, app.hover == Hover::EditTags);
+    draw_button(f, btns[3], "eject", can_eject, app.hover == Hover::Eject);
+    draw_button(f, btns[4], "stop", active, app.hover == Hover::Stop);
     regions.rip_selected = btns[0];
     regions.rip_all = btns[1];
     regions.edit_tags = btns[2];
@@ -819,6 +803,20 @@ mod tests {
         let with_status = rendered(&mut app);
         assert!(!with_status.contains("? for keybinds"));
         assert!(with_status.contains("something happened"));
+    }
+
+    #[test]
+    fn rip_panel_buttons_carry_no_keybind_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        let plain = rendered(&mut app);
+        // The action row reads like buttons, not keybind hints.
+        assert!(plain.contains("rip selected"));
+        assert!(plain.contains("rip all"));
+        assert!(!plain.contains("[r]"));
+        assert!(!plain.contains("[a]"));
+        assert!(!plain.contains("press r"));
     }
 
     #[test]
