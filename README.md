@@ -174,7 +174,14 @@ collide.
 ## Development
 
 ```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+make            # build the debug binary
+make release    # build the release binary
+make test       # run the test suite
+make lint       # fmt check and clippy, warnings denied
 ```
+
+`make install` installs both `rend` and `rend-tui` to `~/.local/bin`
+(`make install-cli` or `make install-tui` for just one of them), and
+`make uninstall` removes them. The targets are thin wrappers around
+`cargo` — override with `CARGO=…` if needed — and `make help` lists
+the full set.
