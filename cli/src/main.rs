@@ -7,7 +7,7 @@ use std::thread;
 use clap::Parser;
 use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Toc, Track};
 use rend_encode::{Format, ffmpeg_available};
-use rend_meta::{DiscMeta, TrackTags, apply, cover_art, disc_id, lookup_disc};
+use rend_meta::{DiscMeta, DiscToc, TrackTags, apply, cover_art, disc_id, lookup_disc};
 
 #[derive(Parser)]
 #[command(name = "rend", version, about = "Rip audio CDs from the command line")]
@@ -193,7 +193,10 @@ fn cmd_info(device: Option<&str>) -> Result<(), Error> {
         });
     }
     let id = disc_id(&lbas);
-    let disc = match lookup_disc(&id) {
+    let disc = match lookup_disc(&DiscToc {
+        offsets: lbas,
+        leadout: toc.leadout_lba,
+    }) {
         Ok(disc) => disc,
         Err(rend_meta::lookup::Error::NotFound) => {
             return Err(Error::Unexpected(format!(
@@ -462,8 +465,10 @@ fn lookup_metadata(toc: &Toc, prefix: &str) -> Option<(DiscMeta, Option<Vec<u8>>
     if lbas.is_empty() {
         return None;
     }
-    let id = disc_id(&lbas);
-    let disc = match lookup_disc(&id) {
+    let disc = match lookup_disc(&DiscToc {
+        offsets: lbas,
+        leadout: toc.leadout_lba,
+    }) {
         Ok(disc) => disc,
         Err(e) => {
             eprintln!("{prefix}metadata lookup failed: {e}");

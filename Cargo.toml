@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
+base64 = "0.22"
 libc = "0.2"
 thiserror = "2"
 lofty = "0.25"
@@ -19,6 +20,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 assert_cmd = "2"
 predicates = "3"
+sha1 = "0.10"
 tempfile = "3"
 
 [profile.release]

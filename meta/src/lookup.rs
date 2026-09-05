@@ -1,15 +1,24 @@
 //! Looking up what a disc is, via MusicBrainz.
 //!
-//! The disc's CDDB id is submitted to MusicBrainz's disc endpoint, which
-//! answers with the matching release — album, artist, year, track titles —
-//! plus a release id that [`cover_art`] uses to fetch the front cover from
-//! the Cover Art Archive.
+//! The disc's layout is submitted to MusicBrainz's disc endpoint in two
+//! steps. First the exact disc id of the TOC is looked up — and, since
+//! some TOC readers report track addresses relative to the disc start
+//! rather than to index 0, the id of the same TOC shifted by the
+//! 150-sector lead-in as well. If no exact registration exists, the
+//! disc's track durations are matched against candidate releases,
+//! keeping the one whose medium's durations come closest. The matched
+//! release yields album, artist, year, and track titles, plus a release
+//! id that [`cover_art`] uses to fetch the front cover from the Cover
+//! Art Archive.
 
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use ureq::config::Config;
 use ureq::{Agent, Error as HttpError};
+
+use crate::discid::mb_discid;
 
 /// How long a single request may run before it is dropped.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -17,6 +26,20 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const MUSICBRAINZ: &str = "https://musicbrainz.org";
 /// The Cover Art Archive base URL.
 const COVER_ART: &str = "https://coverartarchive.org";
+/// Lead-in sectors between the disc start and the first track.
+const DEBIAS: u32 = 150;
+/// A fuzzy candidate is accepted only if every track's duration is within
+/// this many milliseconds of the disc's.
+const FUZZY_TOLERANCE_MS: u64 = 5_000;
+
+/// The disc's track layout, in LBA units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscToc {
+    /// Start LBA of each audio track, in disc order.
+    pub offsets: Vec<u32>,
+    /// Leadout LSN.
+    pub leadout: u32,
+}
 
 /// Metadata for a disc, as looked up from MusicBrainz.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,10 +97,196 @@ fn agent() -> Agent {
     Agent::new_with_config(config)
 }
 
-/// Looks up the disc with the given CDDB id on MusicBrainz.
-pub fn lookup_disc(disc_id: &str) -> Result<DiscMeta, Error> {
-    let url = format!("{MUSICBRAINZ}/ws/2/disc/{disc_id}?fmt=json");
-    lookup_from(&url)
+/// Looks up the disc with layout `toc` on MusicBrainz.
+pub fn lookup_disc(toc: &DiscToc) -> Result<DiscMeta, Error> {
+    // Exact first: the TOC as reported, then shifted by the lead-in,
+    // since registered ids were computed from either.
+    for &debias in [0u32, DEBIAS].iter() {
+        let offsets: Vec<u32> = toc.offsets.iter().map(|&lba| lba + debias).collect();
+        let id = mb_discid(toc.leadout + debias, &offsets);
+        match lookup_cdtoc(&id) {
+            Ok(Some(meta)) => return Ok(meta),
+            Ok(None) | Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    fuzzy_lookup(toc)
+}
+
+fn fuzzy_lookup(toc: &DiscToc) -> Result<DiscMeta, Error> {
+    let releases = lookup_release_list(&toc_param(toc))?;
+    pick_by_duration(&releases.releases, toc)
+}
+
+/// Looks up the disc with the given MusicBrainz disc id.
+///
+/// Returns `Ok(None)` when the id is not registered.
+fn lookup_cdtoc(id: &str) -> Result<Option<DiscMeta>, Error> {
+    let url = format!("{MUSICBRAINZ}/ws/2/discid/{id}?fmt=json&inc=artists+recordings&cdstubs=no");
+    cdtoc_from(&url, id)
+}
+
+fn cdtoc_from(url: &str, id: &str) -> Result<Option<DiscMeta>, Error> {
+    // A 404 means the id is not registered: no match, not an error.
+    let cdtoc: MbCdtoc = match get_json(url) {
+        Ok(cdtoc) => cdtoc,
+        Err(Error::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let Some((release, medium)) = pick_release_and_medium(&cdtoc.releases, id) else {
+        return Ok(None);
+    };
+    Ok(Some(to_disc_meta(release, medium)))
+}
+
+/// Selects the release to describe from an exact-lookup response: the one
+/// whose medium carries the disc id, else the first release (whose first
+/// medium is used). `None` when there is no release at all.
+fn pick_release_and_medium<'a>(
+    releases: &'a [MbRelease],
+    id: &str,
+) -> Option<(&'a MbRelease, Option<&'a MbMedium>)> {
+    releases
+        .iter()
+        .find_map(|release| matched_medium(release, id))
+        .map(|(release, medium)| (release, Some(medium)))
+        .or_else(|| {
+            releases
+                .first()
+                .map(|release| (release, release.media.first()))
+        })
+}
+
+/// Asks MusicBrainz for releases whose track durations resemble the TOC,
+/// encoded as `1+{last track}+{leadout}+{offsets…}`, `+`-separated.
+fn lookup_release_list(toc_param: &str) -> Result<MbReleaseList, Error> {
+    let url = format!(
+        "{MUSICBRAINZ}/ws/2/discid/-?toc={toc_param}&fmt=json&inc=artists+recordings&limit=25"
+    );
+    get_json(&url)
+}
+
+fn toc_param(toc: &DiscToc) -> String {
+    let mut param = format!("1+{}", toc.offsets.len());
+    param.push_str(&format!("+{}", toc.leadout));
+    for &lba in &toc.offsets {
+        param.push_str(&format!("+{lba}"));
+    }
+    param
+}
+
+/// The disc's track durations in ms, from consecutive track starts and
+/// the leadout.
+fn durations_ms(toc: &DiscToc) -> Vec<u64> {
+    let mut ends: Vec<u32> = toc.offsets.to_vec();
+    ends.push(toc.leadout);
+    ends.windows(2)
+        .map(|w| u64::from(w[1].saturating_sub(w[0])) * 1000 / 75)
+        .collect()
+}
+
+/// Chooses the release whose medium's track durations best match the
+/// disc's. The medium must have exactly as many tracks as the disc,
+/// every track must have a known duration, and the worst per-track
+/// difference must be within [`FUZZY_TOLERANCE_MS`].
+fn pick_by_duration(releases: &[MbRelease], toc: &DiscToc) -> Result<DiscMeta, Error> {
+    let target = durations_ms(toc);
+    let mut best: Option<(u64, &MbRelease, &MbMedium)> = None;
+    for release in releases {
+        for medium in &release.media {
+            let tracks = &medium.tracks;
+            if tracks.len() != target.len() {
+                continue;
+            }
+            let mut max_diff = 0u64;
+            let mut complete = true;
+            for (track, &expected) in tracks.iter().zip(&target) {
+                let Some(actual) = track.length.or_else(|| {
+                    track
+                        .recording
+                        .as_ref()
+                        .and_then(|recording| recording.length)
+                }) else {
+                    complete = false;
+                    break;
+                };
+                max_diff = max_diff.max(actual.abs_diff(expected));
+            }
+            if !complete || max_diff > FUZZY_TOLERANCE_MS {
+                continue;
+            }
+            if best.is_none_or(|(diff, _, _)| max_diff < diff) {
+                best = Some((max_diff, release, medium));
+            }
+        }
+    }
+    best.map(|(_, release, medium)| to_disc_meta(release, Some(medium)))
+        .ok_or(Error::NotFound)
+}
+
+fn matched_medium<'a>(release: &'a MbRelease, id: &str) -> Option<(&'a MbRelease, &'a MbMedium)> {
+    release
+        .media
+        .iter()
+        .find(|medium| medium.discs.iter().any(|disc| disc.id == id))
+        .map(|medium| (release, medium))
+}
+
+fn to_disc_meta(release: &MbRelease, medium: Option<&MbMedium>) -> DiscMeta {
+    let release_artist = credit_names(&release.artist_credit);
+    let tracks = medium
+        .map(|m| {
+            m.tracks
+                .iter()
+                .map(|track| TrackMeta {
+                    title: first_nonempty(&track.title, recording_title(&track.recording))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "Unknown".into()),
+                    artist: track_artist(track, &release_artist),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    DiscMeta {
+        album: release.title.clone(),
+        artist: release_artist,
+        year: release.date.as_deref().and_then(year_of),
+        release_id: release.id.clone(),
+        tracks,
+    }
+}
+
+fn track_artist(track: &MbTrack, release_artist: &str) -> Option<String> {
+    let credit = credit_names(&track.artist_credit);
+    (!credit.is_empty() && credit != release_artist).then_some(credit)
+}
+
+/// The display name of an artist credit: each entry's name followed by its
+/// joinphrase, the connector that follows the entry — "A" with joinphrase
+/// " feat. " followed by "B" renders "A feat. B".
+fn credit_names(credit: &[MbCredit]) -> String {
+    credit
+        .iter()
+        .map(|c| format!("{}{}", c.name, c.joinphrase))
+        .collect()
+}
+
+fn recording_title(recording: &Option<MbRecording>) -> &str {
+    recording.as_ref().map_or("", |recording| &recording.title)
+}
+
+fn first_nonempty<'a>(primary: &'a str, fallback: &'a str) -> Option<&'a str> {
+    if !primary.is_empty() {
+        Some(primary)
+    } else {
+        (!fallback.is_empty()).then_some(fallback)
+    }
+}
+
+/// The year of a MusicBrainz date ("1997", "1997-05", "1997-05-20", …).
+fn year_of(date: &str) -> Option<String> {
+    let year = date.split('-').next()?.trim();
+    (!year.is_empty()).then(|| year.to_string())
 }
 
 /// Fetches the front cover (250 px) for the given MusicBrainz release id.
@@ -106,15 +315,12 @@ fn cover_art_from(url: &str) -> Result<Option<Vec<u8>>, Error> {
     }
 }
 
-fn lookup_from(url: &str) -> Result<DiscMeta, Error> {
+fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
     match agent().get(url).call() {
-        Ok(resp) => {
-            let discs: MbDiscs = resp
-                .into_body()
-                .read_json()
-                .map_err(|e| Error::InvalidJson(e.to_string()))?;
-            parse_disc(discs)
-        }
+        Ok(resp) => resp
+            .into_body()
+            .read_json()
+            .map_err(|e| Error::InvalidJson(e.to_string())),
         Err(HttpError::StatusCode(404)) => Err(Error::NotFound),
         Err(HttpError::StatusCode(code)) => Err(Error::HttpStatus(code)),
         Err(e) => Err(network(e)),
@@ -130,79 +336,64 @@ fn network(e: HttpError) -> Error {
     Error::Network(detail)
 }
 
-fn parse_disc(discs: MbDiscs) -> Result<DiscMeta, Error> {
-    let Some(disc) = discs.discs.into_iter().next() else {
-        return Err(Error::NotFound);
-    };
-    let Some(release) = disc.releases.into_iter().next() else {
-        return Err(Error::NotFound);
-    };
-    let tracks = disc
-        .tracks
-        .into_iter()
-        .map(|t| {
-            let recording = t.recording;
-            TrackMeta {
-                title: recording
-                    .as_ref()
-                    .filter(|r| !r.title.is_empty())
-                    .map(|r| r.title.clone())
-                    .unwrap_or_else(|| "Unknown".into()),
-                artist: recording.and_then(|r| r.artist.map(|a| a.name)),
-            }
-        })
-        .collect();
-    Ok(DiscMeta {
-        album: release.title,
-        artist: release.artist.map(|a| a.name).unwrap_or_default(),
-        year: release.date.as_deref().and_then(year_of),
-        release_id: release.id,
-        tracks,
-    })
-}
-
-/// The year of a MusicBrainz date ("1997", "1997-05", "1997-05-20", …).
-fn year_of(date: &str) -> Option<String> {
-    let year = date.split('-').next()?.trim();
-    (!year.is_empty()).then(|| year.to_string())
-}
-
 #[derive(Deserialize)]
-struct MbDiscs {
-    #[serde(default)]
-    discs: Vec<MbDisc>,
-}
-
-#[derive(Deserialize)]
-struct MbDisc {
-    #[serde(default)]
-    tracks: Vec<MbTrack>,
+struct MbCdtoc {
     #[serde(default)]
     releases: Vec<MbRelease>,
 }
 
 #[derive(Deserialize)]
-struct MbTrack {
-    recording: Option<MbRecording>,
-}
-
-#[derive(Deserialize)]
-struct MbRecording {
-    title: String,
-    artist: Option<MbName>,
-}
-
-#[derive(Deserialize)]
-struct MbName {
-    name: String,
+struct MbReleaseList {
+    #[serde(default)]
+    releases: Vec<MbRelease>,
 }
 
 #[derive(Deserialize)]
 struct MbRelease {
     id: String,
     title: String,
-    artist: Option<MbName>,
+    #[serde(default, rename = "artist-credit")]
+    artist_credit: Vec<MbCredit>,
     date: Option<String>,
+    #[serde(default)]
+    media: Vec<MbMedium>,
+}
+
+#[derive(Deserialize)]
+struct MbCredit {
+    name: String,
+    #[serde(default)]
+    joinphrase: String,
+}
+
+#[derive(Deserialize)]
+struct MbMedium {
+    #[serde(default)]
+    tracks: Vec<MbTrack>,
+    #[serde(default)]
+    discs: Vec<MbDisc>,
+}
+
+#[derive(Deserialize)]
+struct MbDisc {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct MbTrack {
+    #[serde(default)]
+    title: String,
+    length: Option<u64>,
+    #[serde(default, rename = "artist-credit")]
+    artist_credit: Vec<MbCredit>,
+    recording: Option<MbRecording>,
+}
+
+#[derive(Deserialize)]
+struct MbRecording {
+    #[serde(default)]
+    title: String,
+    length: Option<u64>,
 }
 
 #[cfg(test)]
@@ -212,38 +403,43 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    const FIXTURE: &str = r#"
+    /// The exact-lookup response for a three-track disc.
+    const EXACT: &str = r#"
     {
-      "discs": [
+      "id": "disc-1",
+      "offset-count": 3,
+      "sectors": 3300,
+      "offsets": [150, 1650, 2450],
+      "releases": [
         {
-          "tracks": [
-            {
-              "number": "1",
-              "position": "1",
-              "recording": {
-                "id": "rec-1",
-                "title": "First Song",
-                "artist": { "id": "art-1", "name": "The Band" },
-                "is-instrumental": false
-              }
-            },
-            {
-              "number": "2",
-              "position": "2",
-              "recording": { "id": "rec-2", "title": "Second Song" }
-            },
-            { "number": "3", "position": "3" }
+          "id": "rel-1",
+          "title": "The Album",
+          "artist-credit": [
+            { "name": "The Band", "joinphrase": " feat. " },
+            { "name": "The Choir", "joinphrase": "" }
           ],
-          "releases": [
+          "date": "1997-05-20",
+          "media": [
             {
-              "id": "rel-1",
-              "title": "The Album",
-              "artist": { "id": "art-1", "name": "The Band" },
-              "release-group": { "id": "rg-1", "title": "The Album" },
-              "date": "1997-05-20",
-              "country": "US",
-              "length": 2480000,
-              "medium-count": 1
+              "position": 1,
+              "format": "CD",
+              "discs": [ { "id": "disc-1" } ],
+              "tracks": [
+                {
+                  "position": 1,
+                  "title": "First Song",
+                  "length": 20100,
+                  "artist-credit": [ { "name": "Guest Star" } ],
+                  "recording": { "id": "rec-1", "title": "First Song" }
+                },
+                {
+                  "position": 2,
+                  "title": "",
+                  "length": 10600,
+                  "recording": { "id": "rec-2", "title": "Second Song" }
+                },
+                { "position": 3, "length": 11400 }
+              ]
             }
           ]
         }
@@ -251,37 +447,178 @@ mod tests {
     }
     "#;
 
+    /// The fuzzy-lookup response: one release whose durations are far off,
+    /// one that matches the test TOC within tolerance.
+    const FUZZY: &str = r#"
+    {
+      "release-count": 2,
+      "releases": [
+        {
+          "id": "rel-wrong",
+          "title": "Wrong Album",
+          "artist-credit": [ { "name": "Other Band" } ],
+          "media": [
+            {
+              "tracks": [
+                { "title": "A", "length": 200000 },
+                { "title": "B", "length": 12000 },
+                { "title": "C", "length": 12000 }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "rel-right",
+          "title": "Right Album",
+          "artist-credit": [ { "name": "The Band" } ],
+          "date": "1998",
+          "media": [
+            {
+              "tracks": [
+                { "title": "A", "length": 20100 },
+                { "title": "B", "length": 10600 },
+                { "title": "C", "length": 11400 }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    "#;
+
+    fn test_toc() -> DiscToc {
+        // Durations: (1650-150), (2450-1650), (3300-2450) frames
+        // = 20000, 10666, 11333 ms.
+        DiscToc {
+            offsets: vec![150, 1650, 2450],
+            leadout: 3300,
+        }
+    }
+
     #[test]
-    fn parses_a_disc_response() {
-        let meta = parse_disc(serde_json::from_str(FIXTURE).unwrap()).unwrap();
+    fn cdtoc_parses_the_matched_release() {
+        let cdtoc: MbCdtoc = serde_json::from_str(EXACT).unwrap();
+        let (release, medium) = matched_medium(&cdtoc.releases[0], "disc-1").unwrap();
+        let meta = to_disc_meta(release, Some(medium));
 
         assert_eq!(meta.album, "The Album");
-        assert_eq!(meta.artist, "The Band");
+        assert_eq!(meta.artist, "The Band feat. The Choir");
         assert_eq!(meta.year.as_deref(), Some("1997"));
         assert_eq!(meta.release_id, "rel-1");
         assert_eq!(meta.tracks.len(), 3);
         assert_eq!(meta.tracks[0].title, "First Song");
-        assert_eq!(meta.tracks[0].artist.as_deref(), Some("The Band"));
+        assert_eq!(meta.tracks[0].artist.as_deref(), Some("Guest Star"));
+        // A track without a title falls back to its recording's.
         assert_eq!(meta.tracks[1].title, "Second Song");
         assert_eq!(meta.tracks[1].artist, None);
-        // A track with no recording falls back to "Unknown".
+        // A bare track falls back to "Unknown".
         assert_eq!(meta.tracks[2].title, "Unknown");
+        assert_eq!(meta.tracks[2].artist, None);
     }
 
     #[test]
-    fn parse_requires_a_release() {
-        let body = r#"{"discs": [{"tracks": [], "releases": []}]}"#;
+    fn picks_the_medium_carrying_the_disc_id() {
+        let cdtoc: MbCdtoc = serde_json::from_str(EXACT).unwrap();
+        let (release, medium) = pick_release_and_medium(&cdtoc.releases, "disc-1").unwrap();
+        assert_eq!(release.id, "rel-1");
+        assert!(medium.is_some());
+        // A disc id no medium lists falls back to the first medium.
+        let (_, medium) = pick_release_and_medium(&cdtoc.releases, "disc-2").unwrap();
+        assert!(medium.is_some());
+        // No releases at all: nothing to describe.
+        let none: Vec<MbRelease> = vec![];
+        assert!(pick_release_and_medium(&none, "disc-1").is_none());
+    }
+
+    #[test]
+    fn pick_prefers_the_closest_durations() {
+        let releases: MbReleaseList = serde_json::from_str(FUZZY).unwrap();
+        let meta = pick_by_duration(&releases.releases, &test_toc()).unwrap();
+        assert_eq!(meta.release_id, "rel-right");
+        assert_eq!(meta.album, "Right Album");
+        assert_eq!(meta.year.as_deref(), Some("1998"));
+        assert_eq!(meta.tracks[0].title, "A");
+    }
+
+    #[test]
+    fn pick_rejects_track_count_mismatches() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"tracks": [ {"title": "A", "length": 20000}, {"title": "B", "length": 10666} ]}
+            ]}]}"#,
+        )
+        .unwrap();
         assert!(matches!(
-            parse_disc(serde_json::from_str(body).unwrap()),
+            pick_by_duration(&releases.releases, &test_toc()),
             Err(Error::NotFound)
         ));
-        let empty: MbDiscs = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(matches!(parse_disc(empty), Err(Error::NotFound)));
+    }
+
+    #[test]
+    fn pick_rejects_missing_lengths() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"tracks": [
+                    { "title": "A", "length": 20000 },
+                    { "title": "B", "length": 10666 },
+                    { "title": "C" }
+                ]}
+            ]}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            pick_by_duration(&releases.releases, &test_toc()),
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[test]
+    fn pick_rejects_distant_durations() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"tracks": [
+                    { "title": "A", "length": 200000 },
+                    { "title": "B", "length": 120000 },
+                    { "title": "C", "length": 130000 }
+                ]}
+            ]}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            pick_by_duration(&releases.releases, &test_toc()),
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[test]
+    fn durations_come_from_consecutive_starts() {
+        assert_eq!(durations_ms(&test_toc()), vec![20_000, 10_666, 11_333]);
+    }
+
+    #[test]
+    fn toc_param_is_pluss_separated() {
+        let toc = DiscToc {
+            offsets: vec![150, 1650],
+            leadout: 3300,
+        };
+        assert_eq!(toc_param(&toc), "1+2+3300+150+1650");
+    }
+
+    #[test]
+    fn credit_names_use_joinphrases() {
+        let credit: Vec<MbCredit> = serde_json::from_str(
+            r#"[{ "name": "The Band", "joinphrase": " feat. " }, { "name": "The Choir" }]"#,
+        )
+        .unwrap();
+        assert_eq!(credit_names(&credit), "The Band feat. The Choir");
+        assert_eq!(credit_names(&[]), "");
     }
 
     #[test]
     fn track_positions_are_one_based() {
-        let meta = parse_disc(serde_json::from_str(FIXTURE).unwrap()).unwrap();
+        let cdtoc: MbCdtoc = serde_json::from_str(EXACT).unwrap();
+        let (release, medium) = matched_medium(&cdtoc.releases[0], "disc-1").unwrap();
+        let meta = to_disc_meta(release, Some(medium));
         assert_eq!(meta.track(1).unwrap().title, "First Song");
         assert_eq!(meta.track(3).unwrap().title, "Unknown");
         assert_eq!(meta.track(0), None);
@@ -324,22 +661,42 @@ mod tests {
     }
 
     #[test]
-    fn lookup_roundtrips_over_http() {
-        let (addr, handle) = serve_once("200 OK", FIXTURE);
-        let meta = lookup_from(&format!("http://{addr}/lookup")).unwrap();
+    fn cdtoc_roundtrips_over_http() {
+        let (addr, handle) = serve_once("200 OK", EXACT);
+        let meta = cdtoc_from(&format!("http://{addr}/cdtoc"), "disc-1").unwrap();
         handle.join().unwrap();
 
+        let meta = meta.unwrap();
         assert_eq!(meta.album, "The Album");
         assert_eq!(meta.tracks.len(), 3);
     }
 
     #[test]
-    fn lookup_404_is_not_found() {
+    fn cdtoc_404_is_no_match() {
         let (addr, handle) = serve_once("404 Not Found", "");
-        let err = lookup_from(&format!("http://{addr}/lookup")).unwrap_err();
+        let meta = cdtoc_from(&format!("http://{addr}/cdtoc"), "disc-1").unwrap();
         handle.join().unwrap();
 
-        assert!(matches!(err, Error::NotFound));
+        assert!(meta.is_none());
+    }
+
+    #[test]
+    fn release_list_roundtrips_over_http() {
+        let (addr, handle) = serve_once("200 OK", FUZZY);
+        let list: MbReleaseList = get_json(&format!("http://{addr}/releases")).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(list.releases.len(), 2);
+        assert_eq!(list.releases[1].id, "rel-right");
+    }
+
+    #[test]
+    fn release_list_404_is_not_found() {
+        let (addr, handle) = serve_once("404 Not Found", "");
+        let err: Result<MbReleaseList, Error> = get_json(&format!("http://{addr}/releases"));
+        handle.join().unwrap();
+
+        assert!(matches!(err, Err(Error::NotFound)));
     }
 
     #[test]

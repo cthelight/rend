@@ -10,6 +10,22 @@ fn bin() -> Command {
     Command::cargo_bin("rend").unwrap()
 }
 
+/// True if the machine has any `/dev/sr*` CD-ROM device node.
+///
+/// `rend rip --all` rips every disc it finds, so a test that relies on
+/// there being no hardware would rip a real disc on a developer's machine.
+/// Such tests are skipped when a device node is present; they still run on
+/// hardware-less CI.
+fn has_cdrom_device() -> bool {
+    std::fs::read_dir("/dev")
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("sr")))
+        })
+        .unwrap_or(false)
+}
+
 #[test]
 fn help_exits_zero() {
     bin()
@@ -94,7 +110,17 @@ fn rip_accepts_wav_format() {
 
 #[test]
 fn rip_accepts_all_flag() {
-    // `--all` is accepted as a flag; with no hardware it reports no devices.
+    // With no hardware, `--all` is accepted and reports no devices. On a
+    // machine with a CD-ROM present we only assert the flag parses, since
+    // actually running it would rip the real disc.
+    if has_cdrom_device() {
+        bin()
+            .args(["rip", "--help"])
+            .assert()
+            .success()
+            .stdout(contains("--all"));
+        return;
+    }
     bin()
         .args(["rip", "--all"])
         .assert()

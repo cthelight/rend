@@ -13,7 +13,7 @@ use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
 use rend_encode::{Format, ffmpeg_available};
-use rend_meta::{DiscMeta, cover_art, disc_id, lookup_disc};
+use rend_meta::{DiscMeta, DiscToc, cover_art, lookup_disc};
 
 use crate::demo::{DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta};
 use crate::rip::{self, RipEvent, RipJob, RipSource};
@@ -431,7 +431,10 @@ impl App {
             self.cover = Some(demo_cover());
             return;
         }
-        let cddb_id = disc_id(&lbas);
+        let disc_toc = DiscToc {
+            offsets: lbas,
+            leadout: toc.leadout_lba,
+        };
         let lookup_id = self.meta_gen + 1;
         self.meta_gen = lookup_id;
         self.status = Some("looking up metadata…".into());
@@ -440,7 +443,7 @@ impl App {
         std::thread::Builder::new()
             .name("rend-meta-lookup".into())
             .spawn(move || {
-                let meta = match lookup_disc(&cddb_id) {
+                let meta = match lookup_disc(&disc_toc) {
                     Ok(meta) => meta,
                     Err(e) => {
                         let _ = tx.send(MetaEvent::Failed {
