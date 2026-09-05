@@ -96,14 +96,7 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .get(app.drive_sel)
         .map(|d| d.path.as_str())
         .unwrap_or("?");
-    let meta = app.meta.as_ref().map(|m| {
-        let year = m
-            .year
-            .as_deref()
-            .map(|y| format!(" ({y})"))
-            .unwrap_or_default();
-        format!(" · {} — {}{year}", m.artist, m.album)
-    });
+    let meta = app.match_status().map(|s| format!(" · {s}"));
     let title = match app.toc.as_ref() {
         Some(_) => {
             let id = app
@@ -136,7 +129,7 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     let start = clamp_scroll(app.tracks_scroll, app.track_sel, toc.tracks.len(), visible);
     app.tracks_scroll = start;
 
-    let titles: std::collections::HashMap<u8, &str> = match app.meta.as_ref() {
+    let titles: std::collections::HashMap<u8, &str> = match app.selected_meta() {
         Some(meta) => toc
             .audio_tracks()
             .enumerate()
@@ -331,7 +324,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
             Color::Gray,
         ),
         None => (
-            " [↑↓] move · [tab] focus · [enter] activate · [r] rip · [a] all · [e] eject · [o] format · [f] force · [q] quit "
+            " [↑↓] move · [tab] focus · [enter] activate · [m] match · [r] rip · [a] all · [e] eject · [o] format · [f] force · [q] quit "
                 .to_string(),
             Color::Gray,
         ),

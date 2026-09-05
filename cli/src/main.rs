@@ -8,7 +8,8 @@ use clap::Parser;
 use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Toc, Track};
 use rend_encode::{Format, ffmpeg_available};
 use rend_meta::{
-    DiscMeta, DiscToc, TrackTags, apply, cover_art, disc_dir, disc_id, lookup_disc, track_path,
+    DiscMeta, DiscToc, TrackTags, apply, cover_art, disc_dir, disc_id, lookup_disc,
+    lookup_disc_all, track_path,
 };
 
 #[derive(Parser)]
@@ -30,29 +31,48 @@ enum Command {
     Toc,
     /// Rip audio tracks to FLAC (default) or WAV files (across several drives in parallel).
     Rip {
-        /// Directory to write the track files to.
-        #[arg(short, long, default_value = ".")]
-        output_dir: PathBuf,
-        /// Output format: flac (default, transcoded with ffmpeg) or wav.
-        #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
-        format: Format,
-        /// Only rip the given track number (repeatable; default: all audio tracks).
-        #[arg(short = 't', long = "track")]
-        tracks: Vec<u8>,
-        /// Overwrite existing files.
-        #[arg(short, long)]
-        force: bool,
-        /// Rip every discovered drive in parallel.
-        #[arg(long)]
-        all: bool,
-        /// Skip looking up and embedding the disc's metadata.
-        #[arg(long)]
-        no_metadata: bool,
+        #[command(flatten)]
+        args: RipArgs,
     },
     /// Look up and show the disc's metadata (album, artist, tracks).
-    Info,
+    Info {
+        /// List every candidate match, best first, instead of only the
+        /// closest one.
+        #[arg(long)]
+        matches: bool,
+        /// Show the Nth candidate match (1 is the best).
+        #[arg(long = "match", value_name = "N")]
+        r#match: Option<usize>,
+    },
     /// Eject the disc.
     Eject,
+}
+
+/// The `rend rip` options, grouped so the command dispatch stays narrow.
+#[derive(clap::Args)]
+struct RipArgs {
+    /// Directory to write the track files to.
+    #[arg(short, long, default_value = ".")]
+    output_dir: PathBuf,
+    /// Output format: flac (default, transcoded with ffmpeg) or wav.
+    #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
+    format: Format,
+    /// Only rip the given track number (repeatable; default: all audio tracks).
+    #[arg(short = 't', long = "track")]
+    tracks: Vec<u8>,
+    /// Overwrite existing files.
+    #[arg(short, long)]
+    force: bool,
+    /// Rip every discovered drive in parallel.
+    #[arg(long)]
+    all: bool,
+    /// Skip looking up and embedding the disc's metadata.
+    #[arg(long)]
+    no_metadata: bool,
+    /// Tag the rip with the Nth candidate match (1 is the best; see
+    /// `rend info --matches`).
+    #[arg(long = "match", value_name = "N")]
+    r#match: Option<usize>,
 }
 
 fn main() -> ExitCode {
@@ -70,23 +90,10 @@ fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
         Command::Drives => cmd_drives(),
         Command::Toc => cmd_toc(single_device(&cli.devices)?),
-        Command::Rip {
-            output_dir,
-            format,
-            tracks,
-            force,
-            all,
-            no_metadata,
-        } => cmd_rip(
-            &cli.devices,
-            all,
-            &output_dir,
-            format,
-            &tracks,
-            force,
-            no_metadata,
-        ),
-        Command::Info => cmd_info(single_device(&cli.devices)?),
+        Command::Rip { args } => cmd_rip(&cli.devices, &args),
+        Command::Info { matches, r#match } => {
+            cmd_info(single_device(&cli.devices)?, matches, r#match)
+        }
         Command::Eject => cmd_eject(single_device(&cli.devices)?),
     }
 }
@@ -185,7 +192,7 @@ fn cmd_toc(device: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn cmd_info(device: Option<&str>) -> Result<(), Error> {
+fn cmd_info(device: Option<&str>, matches: bool, r#match: Option<usize>) -> Result<(), Error> {
     let dev = open_device(device)?;
     let toc = dev.toc()?;
     let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
@@ -195,20 +202,57 @@ fn cmd_info(device: Option<&str>) -> Result<(), Error> {
         });
     }
     let id = disc_id(&lbas);
-    let disc = match lookup_disc(&DiscToc {
+    let toc_ = DiscToc {
         offsets: lbas,
         leadout: toc.leadout_lba,
-    }) {
-        Ok(disc) => disc,
-        Err(rend_meta::lookup::Error::NotFound) => {
-            return Err(Error::Unexpected(format!(
-                "no release matched disc {id} (is it a commercial disc?)"
-            )));
-        }
-        Err(e) => return Err(Error::Unexpected(format!("metadata lookup failed: {e}"))),
     };
 
+    if let Some(n) = r#match {
+        let candidates =
+            lookup_disc_all(&toc_).map_err(|e| Error::Unexpected(lookup_error(e, &id)))?;
+        let disc = nth_candidate(&candidates, n)?;
+        println!("disc id    {id}");
+        print_match(disc, None);
+        return Ok(());
+    }
+    if matches {
+        let candidates =
+            lookup_disc_all(&toc_).map_err(|e| Error::Unexpected(lookup_error(e, &id)))?;
+        println!("disc id    {id}");
+        for (i, disc) in candidates.iter().enumerate() {
+            print_match(disc, Some((i + 1, candidates.len())));
+        }
+        return Ok(());
+    }
+
+    let disc = match lookup_disc(&toc_) {
+        Ok(disc) => disc,
+        Err(rend_meta::lookup::Error::NotFound) => {
+            // The disc may still have a close-but-distant candidate the
+            // default lookup is not willing to accept.
+            let n = lookup_disc_all(&toc_).map(|c| c.len()).unwrap_or(0);
+            let hint = if n > 0 {
+                format!("; `rend info --matches` lists {n} close candidate(s)")
+            } else {
+                " (is it a commercial disc?)".into()
+            };
+            return Err(Error::Unexpected(format!(
+                "no release matched disc {id}{hint}"
+            )));
+        }
+        Err(e) => return Err(Error::Unexpected(lookup_error(e, &id))),
+    };
     println!("disc id    {id}");
+    print_match(&disc, None);
+    Ok(())
+}
+
+/// Prints one match's metadata, optionally under a `match i of n` header.
+fn print_match(disc: &DiscMeta, position: Option<(usize, usize)>) {
+    if let Some((i, n)) = position {
+        println!();
+        println!("match {i} of {n}");
+    }
     println!("album      {}", disc.album);
     println!("artist     {}", disc.artist);
     if let Some(year) = &disc.year {
@@ -220,7 +264,29 @@ fn cmd_info(device: Option<&str>) -> Result<(), Error> {
         let artist = t.artist.as_deref().unwrap_or(&disc.artist);
         println!("track {:>2}  {:<30} {}", i + 1, t.title, artist);
     }
-    Ok(())
+}
+
+/// A lookup error, phrased for the disc with the given id.
+fn lookup_error(e: rend_meta::lookup::Error, id: &str) -> String {
+    match e {
+        rend_meta::lookup::Error::NotFound => {
+            format!("no release matched disc {id} (is it a commercial disc?)")
+        }
+        other => format!("metadata lookup failed: {other}"),
+    }
+}
+
+/// The `n`th (1-based) candidate, if the list is long enough.
+fn nth_candidate(candidates: &[DiscMeta], n: usize) -> Result<&DiscMeta, Error> {
+    let Some(i) = n.checked_sub(1) else {
+        return Err(Error::Unexpected("--match numbers start at 1".into()));
+    };
+    candidates.get(i).ok_or_else(|| {
+        Error::Unexpected(format!(
+            "no candidate {n}: the disc has {count} candidate match(es); see `rend info --matches`",
+            count = candidates.len()
+        ))
+    })
 }
 
 /// The options shared by a drive's rip worker and its per-track rips.
@@ -228,26 +294,28 @@ struct RipOptions {
     format: Format,
     force: bool,
     no_metadata: bool,
+    r#match: Option<usize>,
     prefix: String,
     progress: bool,
 }
 
-fn cmd_rip(
-    devices: &[String],
-    all: bool,
-    output_dir: &Path,
-    format: Format,
-    only: &[u8],
-    force: bool,
-    no_metadata: bool,
-) -> Result<(), Error> {
+fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
+    let RipArgs {
+        output_dir,
+        format,
+        tracks,
+        force,
+        all,
+        no_metadata,
+        r#match,
+    } = args;
     if format.requires_ffmpeg() && !ffmpeg_available() {
         return Err(Error::Unexpected(
             "ffmpeg not found in PATH — install it for FLAC output, or rip with --format wav"
                 .into(),
         ));
     }
-    let resolved = rip_devices(devices, all)?;
+    let resolved = rip_devices(devices, *all)?;
 
     // One drive keeps the flat layout; several get a subdirectory each, named
     // after the device (e.g. `sr0`), so track files never collide.
@@ -272,9 +340,10 @@ fn cmd_rip(
                 String::new()
             };
             let opts = RipOptions {
-                format,
-                force,
-                no_metadata,
+                format: *format,
+                force: *force,
+                no_metadata: *no_metadata,
+                r#match: *r#match,
                 prefix,
                 progress: !multi,
             };
@@ -285,7 +354,7 @@ fn cmd_rip(
     // One worker thread per drive; they all run at the same time.
     let mut handles = Vec::new();
     for (dev, dir, opts) in jobs {
-        let only = only.to_vec();
+        let only = tracks.to_vec();
         let path = dev.path().to_string();
         let handle = thread::Builder::new()
             .name(format!("rend-rip-{path}"))
@@ -369,6 +438,8 @@ fn rip_device(
     let total_audio = toc.audio_tracks().count();
     let metadata = if opts.no_metadata {
         None
+    } else if let Some(n) = opts.r#match {
+        Some(resolve_match(&toc, n, prefix)?)
     } else {
         lookup_metadata(&toc, prefix)
     };
@@ -515,6 +586,35 @@ fn lookup_metadata(toc: &Toc, prefix: &str) -> Option<(DiscMeta, Option<Vec<u8>>
     Some((disc, art))
 }
 
+/// Resolves the `n`th (1-based) candidate match of the disc to metadata and
+/// cover art.
+///
+/// Unlike [`lookup_metadata`], any failure is an error rather than a
+/// warning: an explicitly requested match must not be silently replaced by
+/// the default one.
+fn resolve_match(toc: &Toc, n: usize, prefix: &str) -> Result<(DiscMeta, Option<Vec<u8>>), Error> {
+    let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
+    let id = disc_id(&lbas);
+    let candidates = lookup_disc_all(&DiscToc {
+        offsets: lbas,
+        leadout: toc.leadout_lba,
+    })
+    .map_err(|e| Error::Unexpected(format!("{prefix}{}", lookup_error(e, &id))))?;
+    let disc = nth_candidate(&candidates, n)?;
+    let art = cover_art(&disc.release_id)
+        .map_err(|e| Error::Unexpected(format!("{prefix}cover art lookup failed: {e}")))?;
+    eprintln!(
+        "{prefix}{} — {}{}",
+        disc.artist,
+        disc.album,
+        disc.year
+            .as_deref()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default()
+    );
+    Ok((disc.clone(), art))
+}
+
 /// Applies the looked-up metadata to one ripped track file, warning (rather
 /// than failing) if the tags cannot be written.
 fn tag_track(
@@ -567,6 +667,31 @@ mod tests {
         assert_eq!(fmt_duration(0), "0:00");
         assert_eq!(fmt_duration(FRAMES_PER_SECOND * 75), "1:15");
         assert_eq!(fmt_duration(FRAMES_PER_SECOND * 60 + 37), "1:00");
+    }
+
+    #[test]
+    fn nth_candidate_is_one_based() {
+        let one = DiscMeta {
+            album: "A".into(),
+            artist: "B".into(),
+            year: None,
+            release_id: "r1".into(),
+            tracks: vec![],
+        };
+        let two = DiscMeta {
+            album: "C".into(),
+            artist: "B".into(),
+            year: None,
+            release_id: "r2".into(),
+            tracks: vec![],
+        };
+        let candidates = [one.clone(), two.clone()];
+        assert_eq!(nth_candidate(&candidates, 1).unwrap().release_id, "r1");
+        assert_eq!(nth_candidate(&candidates, 2).unwrap().release_id, "r2");
+        assert!(nth_candidate(&candidates, 0).is_err());
+        assert!(nth_candidate(&candidates, 3).is_err());
+        let none: [DiscMeta; 0] = [];
+        assert!(nth_candidate(&none, 1).is_err());
     }
 
     #[test]

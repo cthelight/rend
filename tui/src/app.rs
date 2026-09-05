@@ -13,9 +13,11 @@ use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
 use rend_encode::{Format, ffmpeg_available};
-use rend_meta::{DiscMeta, DiscToc, cover_art, lookup_disc};
+use rend_meta::{DiscMeta, DiscToc, cover_art, lookup_disc_all};
 
-use crate::demo::{DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta};
+use crate::demo::{
+    DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta_all,
+};
 use crate::rip::{self, RipEvent, RipJob, RipSource};
 
 /// Which panel has keyboard focus.
@@ -263,10 +265,12 @@ fn drive_label(info: &DeviceInfo) -> String {
 /// The outcome of a background metadata lookup. `id` records which lookup
 /// produced it, so results from a previous disc can be discarded.
 enum MetaEvent {
-    /// The lookup succeeded.
-    Resolved {
+    /// The candidate list arrived, best first.
+    Candidates { id: u64, candidates: Vec<DiscMeta> },
+    /// Cover art for the given release arrived.
+    Cover {
         id: u64,
-        meta: DiscMeta,
+        release_id: String,
         cover: Option<Vec<u8>>,
     },
     /// The lookup failed.
@@ -298,12 +302,16 @@ pub struct App {
     pub drives_scroll: usize,
     pub toc: Option<Toc>,
     pub disc_id: Option<String>,
-    /// The looked-up metadata for the loaded disc, once resolved.
-    pub meta: Option<DiscMeta>,
-    /// The disc's cover art, once fetched.
+    /// The looked-up candidate metadata for the loaded disc, best first.
+    pub meta: Option<Vec<DiscMeta>>,
+    /// The selected candidate within `meta`.
+    meta_sel: usize,
+    /// The selected candidate's cover art, once fetched.
     cover: Option<Vec<u8>>,
-    /// Pending results from the metadata lookup worker.
+    /// Pending results from the metadata lookup workers.
     meta_rx: Option<mpsc::Receiver<MetaEvent>>,
+    /// The sender of the metadata lookup channel, for the cover worker.
+    meta_tx: Option<mpsc::Sender<MetaEvent>>,
     /// Generation counter invalidating in-flight lookups on disc changes.
     meta_gen: u64,
     pub track_sel: usize,
@@ -338,8 +346,10 @@ impl App {
             toc: None,
             disc_id: None,
             meta: None,
+            meta_sel: 0,
             cover: None,
             meta_rx: None,
+            meta_tx: None,
             meta_gen: 0,
             track_sel: 0,
             tracks_scroll: 0,
@@ -399,6 +409,7 @@ impl App {
         self.toc = None;
         self.disc_id = None;
         self.meta = None;
+        self.meta_sel = 0;
         self.cover = None;
         match self.drives[idx].toc() {
             Ok(toc) => {
@@ -411,19 +422,22 @@ impl App {
         }
     }
 
-    /// Starts looking up the disc's metadata: built in for the simulated
-    /// disc, on a background thread for a real one.
+    /// Starts looking up the disc's candidate metadata: built in for the
+    /// simulated disc, on a background thread for a real one.
     fn lookup_metadata(&mut self, toc: &Toc) {
         let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
         if lbas.is_empty() {
             self.status = Some("no audio tracks to look up".into());
             return;
         }
+        self.meta = None;
+        self.meta_sel = 0;
+        self.cover = None;
+        self.meta_rx = None;
+        self.meta_tx = None;
         if self.drives[self.drive_sel].is_demo() {
-            let meta = demo_meta();
-            let year = meta.year.as_deref().unwrap_or("");
-            self.status = Some(format!("{} — {} ({year})", meta.artist, meta.album));
-            self.meta = Some(meta);
+            self.meta = Some(demo_meta_all());
+            self.status = Some(self.match_status().unwrap_or_default());
             self.cover = Some(demo_cover());
             return;
         }
@@ -436,11 +450,12 @@ impl App {
         self.status = Some("looking up metadata…".into());
         let (tx, rx) = mpsc::channel();
         self.meta_rx = Some(rx);
+        self.meta_tx = Some(tx.clone());
         std::thread::Builder::new()
             .name("rend-meta-lookup".into())
             .spawn(move || {
-                let meta = match lookup_disc(&disc_toc) {
-                    Ok(meta) => meta,
+                let candidates = match lookup_disc_all(&disc_toc) {
+                    Ok(candidates) => candidates,
                     Err(e) => {
                         let _ = tx.send(MetaEvent::Failed {
                             id: lookup_id,
@@ -449,11 +464,9 @@ impl App {
                         return;
                     }
                 };
-                let cover = cover_art(&meta.release_id).ok().flatten();
-                let _ = tx.send(MetaEvent::Resolved {
+                let _ = tx.send(MetaEvent::Candidates {
                     id: lookup_id,
-                    meta,
-                    cover,
+                    candidates,
                 });
             })
             .ok();
@@ -470,19 +483,31 @@ impl App {
         }
         for event in events {
             match event {
-                MetaEvent::Resolved { id, meta, cover } => {
+                MetaEvent::Candidates { id, candidates } => {
+                    if id != self.meta_gen || candidates.is_empty() {
+                        continue;
+                    }
+                    self.meta = Some(candidates);
+                    self.status = Some(self.match_status().unwrap_or_default());
+                    self.fetch_cover();
+                }
+                MetaEvent::Cover {
+                    id,
+                    release_id,
+                    cover,
+                } => {
                     if id != self.meta_gen {
                         continue;
                     }
-                    let year = meta
-                        .year
-                        .as_deref()
-                        .map(|y| format!(" ({y})"))
-                        .unwrap_or_default();
-                    self.status = Some(format!("{} — {}{year}", meta.artist, meta.album));
-                    self.meta = Some(meta);
-                    self.cover = cover;
+                    // Ignore a cover whose candidate is no longer selected.
+                    let current = self
+                        .selected_meta()
+                        .is_some_and(|d| d.release_id == release_id);
+                    if current {
+                        self.cover = cover;
+                    }
                     self.meta_rx = None;
+                    self.meta_tx = None;
                 }
                 MetaEvent::Failed { id, reason } => {
                     if id != self.meta_gen {
@@ -490,9 +515,79 @@ impl App {
                     }
                     self.status = Some(format!("metadata lookup failed: {reason}"));
                     self.meta_rx = None;
+                    self.meta_tx = None;
                 }
             }
         }
+    }
+
+    /// The currently selected candidate match, if any.
+    pub fn selected_meta(&self) -> Option<&DiscMeta> {
+        self.meta.as_ref().and_then(|m| m.get(self.meta_sel))
+    }
+
+    /// The status line describing the selected candidate, if any.
+    pub fn match_status(&self) -> Option<String> {
+        let candidates = self.meta.as_ref()?;
+        let disc = candidates.get(self.meta_sel)?;
+        let year = disc
+            .year
+            .as_deref()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        let prefix = if candidates.len() > 1 {
+            format!("match {} of {} · ", self.meta_sel + 1, candidates.len())
+        } else {
+            String::new()
+        };
+        Some(format!("{prefix}{} — {}{year}", disc.artist, disc.album))
+    }
+
+    /// Switches to the next candidate match, wrapping around.
+    pub fn next_match(&mut self) {
+        let Some(count) = self.meta.as_ref().map(|m| m.len()) else {
+            self.status = Some("no matches to switch to — the lookup is pending or failed".into());
+            return;
+        };
+        if count == 1 {
+            self.status = Some("only one candidate match".into());
+            return;
+        }
+        self.meta_sel = (self.meta_sel + 1) % count;
+        self.cover = None;
+        self.status = Some(self.match_status().unwrap_or_default());
+        self.fetch_cover();
+    }
+
+    /// Starts fetching the selected candidate's cover art: built in for the
+    /// simulated disc, on a background thread for a real one.
+    fn fetch_cover(&mut self) {
+        let Some(disc) = self.selected_meta().cloned() else {
+            return;
+        };
+        if self.drives.get(self.drive_sel).is_some_and(Drive::is_demo) {
+            self.cover = Some(demo_cover());
+            return;
+        }
+        if self.meta_tx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.meta_tx = Some(tx.clone());
+            self.meta_rx = Some(rx);
+        }
+        let tx = self.meta_tx.clone().unwrap();
+        let id = self.meta_gen;
+        let release_id = disc.release_id;
+        std::thread::Builder::new()
+            .name("rend-cover".into())
+            .spawn(move || {
+                let cover = cover_art(&release_id).ok().flatten();
+                let _ = tx.send(MetaEvent::Cover {
+                    id,
+                    release_id,
+                    cover,
+                });
+            })
+            .ok();
     }
 
     /// Handles a key press.
@@ -530,6 +625,7 @@ impl App {
             },
             KeyCode::Char('r') => self.rip_selected_track(),
             KeyCode::Char('a') => self.rip_all_audio(),
+            KeyCode::Char('m') => self.next_match(),
             KeyCode::Char('e') => self.eject(),
             KeyCode::Char('s') => self.stop_rip(),
             _ => {}
@@ -713,7 +809,10 @@ impl App {
             self.toc = None;
             self.disc_id = None;
             self.meta = None;
+            self.meta_sel = 0;
             self.cover = None;
+            self.meta_rx = None;
+            self.meta_tx = None;
             self.meta_gen += 1;
             if let Some(rip) = self.rips.get_mut(&selected) {
                 rip.state.states.clear();
@@ -830,7 +929,10 @@ impl App {
                 self.toc = None;
                 self.disc_id = None;
                 self.meta = None;
+                self.meta_sel = 0;
                 self.cover = None;
+                self.meta_rx = None;
+                self.meta_tx = None;
                 self.meta_gen += 1;
                 self.rips.remove(&idx);
                 self.status = Some(format!("ejecting {}", self.drives[idx].path));
@@ -884,7 +986,7 @@ impl App {
             format: self.format,
             force: self.force,
             stop: stop.clone(),
-            meta: self.meta.clone(),
+            meta: self.selected_meta().cloned(),
             cover: self.cover.clone(),
         };
         let thread = rip::spawn(job, tx);
@@ -1026,10 +1128,45 @@ mod tests {
         assert_eq!(toc.tracks.len(), 5);
         assert_eq!(app.disc_id.as_deref(), Some(DEMO_MCN));
         // The simulated disc's metadata is available immediately, no network.
-        let meta = app.meta.as_ref().unwrap();
+        let meta = app.selected_meta().unwrap();
         assert_eq!(meta.album, "Demo Album");
         assert_eq!(meta.tracks.len(), 5);
+        // The simulated disc carries a second candidate for the switch flow.
+        assert_eq!(app.meta.as_ref().unwrap().len(), 2);
         assert!(app.cover.is_some());
+    }
+
+    #[test]
+    fn switches_candidate_matches_with_m() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album");
+
+        app.handle_key(key('m'));
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album (Reissue)");
+        // The reissue's cover replaces the first candidate's.
+        assert_eq!(app.cover.as_deref(), Some(demo_cover().as_slice()));
+
+        // The key wraps back to the first candidate.
+        app.handle_key(key('m'));
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album");
+    }
+
+    #[test]
+    fn rip_uses_the_switched_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.handle_key(key('m'));
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album (Reissue)");
+        app.track_sel = 2;
+        app.rip_selected_track();
+        drain_until_finished(&mut app, Duration::from_secs(10));
+
+        // The file is named after the reissue's track title, not the
+        // original candidate's.
+        let flac = dir.path().join("The Demo Band/03 Short One (Reprise).flac");
+        assert!(flac.exists());
+        assert!(!dir.path().join("The Demo Band/03 Short One.flac").exists());
     }
 
     #[test]

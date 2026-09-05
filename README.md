@@ -24,6 +24,9 @@ rend rip -f                    # overwrite existing files
 rend rip -F wav                # output WAV instead of FLAC
 rend rip --no-metadata         # rip without looking up or tagging metadata
 rend info                      # look up and show the disc's metadata
+rend info --matches            # list every candidate match, best first
+rend info --match 2            # show the second candidate match
+rend rip --match 2             # rip tagged with the second candidate match
 rend eject                     # eject the disc
 
 rend -d /dev/sr1 toc           # use a specific device (default: first found)
@@ -57,6 +60,12 @@ known. The lookup is best effort: without network access, or when the disc
 isn't found, the rip proceeds with no tags. Use `--no-metadata` to skip
 the lookup entirely, or `rend info` to see what would be applied without
 ripping anything.
+
+When several releases could be the disc (a reissue, a remaster, a
+compilation), the lookup ranks the candidates by how close their track
+durations come to the disc's and uses the best one. `rend info --matches`
+lists every candidate, and `rend info --match N` or `rend rip --match N`
+deliberately picks the Nth one (1 is the best).
 
 ### Ripping several drives in parallel
 
@@ -100,6 +109,7 @@ Keyboard:
 | `j`/`k`, `↑`/`↓` | move selection                  |
 | `tab`/`shift+tab`| switch focus between panels     |
 | `enter`          | activate (load TOC / rip)       |
+| `m`              | switch to the next candidate match |
 | `r`              | rip the selected track          |
 | `a`              | rip all audio tracks            |
 | `e`              | eject the disc                  |
@@ -113,9 +123,12 @@ scroll the drives and TOC lists. Buttons can be clicked as well.
 
 When a disc's table of contents is loaded, the disc is looked up on
 MusicBrainz in the background; the TOC panel then shows the track titles
-and the panel header shows artist, album, and year. Ripped tracks carry
-the looked-up metadata and cover art, embedded the same way as in the CLI
-(best effort — a failed lookup never blocks a rip).
+and the panel header shows artist, album, and year. If the lookup finds
+several candidate releases, the header shows `match i of n` and `m`
+switches to the next one, re-fetching its cover art; rips are tagged with
+whichever match is selected. Ripped tracks carry the looked-up metadata
+and cover art, embedded the same way as in the CLI (best effort — a
+failed lookup never blocks a rip).
 
 When more than one drive is present, several can rip at the same time:
 each drive keeps its own rip state, so you can start a rip on one drive

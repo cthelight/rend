@@ -6,10 +6,12 @@
 //! rather than to index 0, the id of the same TOC shifted by the
 //! 150-sector lead-in as well. If no exact registration exists, the
 //! disc's track durations are matched against candidate releases,
-//! keeping the one whose medium's durations come closest. The matched
-//! release yields album, artist, year, and track titles, plus a release
-//! id that [`cover_art`] uses to fetch the front cover from the Cover
-//! Art Archive.
+//! keeping the one whose medium's durations come closest.
+//! [`lookup_disc`] returns that best match; [`lookup_disc_all`] lists
+//! every candidate, best first, so a worse match can be chosen
+//! deliberately. The matched release yields album, artist, year, and
+//! track titles, plus a release id that [`cover_art`] uses to fetch the
+//! front cover from the Cover Art Archive.
 
 use std::time::Duration;
 
@@ -98,24 +100,55 @@ fn agent() -> Agent {
 }
 
 /// Looks up the disc with layout `toc` on MusicBrainz.
+///
+/// An exact disc-id hit is returned as-is. Otherwise the disc's track
+/// durations are matched against candidate releases and the best match is
+/// accepted only if every track's duration is within
+/// [`FUZZY_TOLERANCE_MS`] of the disc's; a closer-but-distant release is
+/// no match, and [`lookup_disc_all`] can be used to see it anyway.
 pub fn lookup_disc(toc: &DiscToc) -> Result<DiscMeta, Error> {
-    // Exact first: the TOC as reported, then shifted by the lead-in,
-    // since registered ids were computed from either.
+    let candidate = candidates(toc)?
+        .into_iter()
+        .find(|c| c.max_diff <= FUZZY_TOLERANCE_MS)
+        .ok_or(Error::NotFound)?;
+    Ok(candidate.meta)
+}
+
+/// Looks up the disc with layout `toc` and returns every candidate match,
+/// best first.
+///
+/// An exact disc-id hit yields a single candidate. Otherwise the disc's
+/// track durations are matched against candidate releases; every release
+/// whose medium has the right track count and known durations is listed,
+/// ranked by the worst per-track duration difference. No tolerance
+/// applies — a distant release is still a candidate.
+pub fn lookup_disc_all(toc: &DiscToc) -> Result<Vec<DiscMeta>, Error> {
+    Ok(candidates(toc)?.into_iter().map(|c| c.meta).collect())
+}
+
+/// A candidate match with how far off its worst track's duration is.
+struct Candidate {
+    meta: DiscMeta,
+    max_diff: u64,
+}
+
+/// Finds every candidate for the disc: first an exact disc-id hit (the
+/// TOC as reported, then shifted by the lead-in, since registered ids
+/// were computed from either), else a duration-ranked list.
+fn candidates(toc: &DiscToc) -> Result<Vec<Candidate>, Error> {
     for &debias in [0u32, DEBIAS].iter() {
         let offsets: Vec<u32> = toc.offsets.iter().map(|&lba| lba + debias).collect();
         let id = mb_discid(toc.leadout + debias, &offsets);
         match lookup_cdtoc(&id) {
-            Ok(Some(meta)) => return Ok(meta),
+            Ok(Some(meta)) => {
+                return Ok(vec![Candidate { meta, max_diff: 0 }]);
+            }
             Ok(None) | Err(Error::NotFound) => {}
             Err(e) => return Err(e),
         }
     }
-    fuzzy_lookup(toc)
-}
-
-fn fuzzy_lookup(toc: &DiscToc) -> Result<DiscMeta, Error> {
     let releases = lookup_release_list(&toc_param(toc))?;
-    pick_by_duration(&releases.releases, toc)
+    Ok(rank_candidates(&releases.releases, toc).unwrap_or_default())
 }
 
 /// Looks up the disc with the given MusicBrainz disc id.
@@ -185,43 +218,54 @@ fn durations_ms(toc: &DiscToc) -> Vec<u64> {
         .collect()
 }
 
-/// Chooses the release whose medium's track durations best match the
-/// disc's. The medium must have exactly as many tracks as the disc,
-/// every track must have a known duration, and the worst per-track
-/// difference must be within [`FUZZY_TOLERANCE_MS`].
-fn pick_by_duration(releases: &[MbRelease], toc: &DiscToc) -> Result<DiscMeta, Error> {
+/// Ranks every candidate release for the disc, best first.
+///
+/// Each release is scored by its best medium: the one whose track count
+/// equals the disc's and whose tracks all have a known duration, with the
+/// lowest worst per-track difference. Releases without such a medium are
+/// dropped. The ranking is stable, so a tie keeps MusicBrainz's order.
+fn rank_candidates(releases: &[MbRelease], toc: &DiscToc) -> Option<Vec<Candidate>> {
     let target = durations_ms(toc);
-    let mut best: Option<(u64, &MbRelease, &MbMedium)> = None;
+    let mut ranked: Vec<Candidate> = Vec::new();
     for release in releases {
+        let mut best: Option<(u64, &MbMedium)> = None;
         for medium in &release.media {
-            let tracks = &medium.tracks;
-            if tracks.len() != target.len() {
-                continue;
-            }
-            let mut max_diff = 0u64;
-            let mut complete = true;
-            for (track, &expected) in tracks.iter().zip(&target) {
-                let Some(actual) = track.length.or_else(|| {
-                    track
-                        .recording
-                        .as_ref()
-                        .and_then(|recording| recording.length)
-                }) else {
-                    complete = false;
-                    break;
-                };
-                max_diff = max_diff.max(actual.abs_diff(expected));
-            }
-            if !complete || max_diff > FUZZY_TOLERANCE_MS {
-                continue;
-            }
-            if best.is_none_or(|(diff, _, _)| max_diff < diff) {
-                best = Some((max_diff, release, medium));
+            if let Some(diff) = score_medium(&medium.tracks, &target)
+                && best.is_none_or(|(so_far, _)| diff < so_far)
+            {
+                best = Some((diff, medium));
             }
         }
+        if let Some((max_diff, medium)) = best {
+            ranked.push(Candidate {
+                meta: to_disc_meta(release, Some(medium)),
+                max_diff,
+            });
+        }
     }
-    best.map(|(_, release, medium)| to_disc_meta(release, Some(medium)))
-        .ok_or(Error::NotFound)
+    (!ranked.is_empty()).then(|| {
+        ranked.sort_by_key(|c| c.max_diff);
+        ranked
+    })
+}
+
+/// How far off the worst track's duration is, if `tracks` is a complete
+/// scoring for `target` (same count, every duration known).
+fn score_medium(tracks: &[MbTrack], target: &[u64]) -> Option<u64> {
+    if tracks.len() != target.len() {
+        return None;
+    }
+    let mut max_diff = 0u64;
+    for (track, &expected) in tracks.iter().zip(target) {
+        let actual = track.length.or_else(|| {
+            track
+                .recording
+                .as_ref()
+                .and_then(|recording| recording.length)
+        })?;
+        max_diff = max_diff.max(actual.abs_diff(expected));
+    }
+    Some(max_diff)
 }
 
 fn matched_medium<'a>(release: &'a MbRelease, id: &str) -> Option<(&'a MbRelease, &'a MbMedium)> {
@@ -531,49 +575,23 @@ mod tests {
     }
 
     #[test]
-    fn pick_prefers_the_closest_durations() {
+    fn rank_lists_candidates_best_first() {
         let releases: MbReleaseList = serde_json::from_str(FUZZY).unwrap();
-        let meta = pick_by_duration(&releases.releases, &test_toc()).unwrap();
-        assert_eq!(meta.release_id, "rel-right");
-        assert_eq!(meta.album, "Right Album");
-        assert_eq!(meta.year.as_deref(), Some("1998"));
-        assert_eq!(meta.tracks[0].title, "A");
+        let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].max_diff, 100);
+        assert_eq!(ranked[0].meta.release_id, "rel-right");
+        assert_eq!(ranked[0].meta.album, "Right Album");
+        assert_eq!(ranked[0].meta.year.as_deref(), Some("1998"));
+        assert_eq!(ranked[0].meta.tracks[0].title, "A");
+        // The distant release is still a candidate, ranked last.
+        assert_eq!(ranked[1].max_diff, 180_000);
+        assert_eq!(ranked[1].meta.release_id, "rel-wrong");
     }
 
     #[test]
-    fn pick_rejects_track_count_mismatches() {
-        let releases: MbReleaseList = serde_json::from_str(
-            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
-                {"tracks": [ {"title": "A", "length": 20000}, {"title": "B", "length": 10666} ]}
-            ]}]}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            pick_by_duration(&releases.releases, &test_toc()),
-            Err(Error::NotFound)
-        ));
-    }
-
-    #[test]
-    fn pick_rejects_missing_lengths() {
-        let releases: MbReleaseList = serde_json::from_str(
-            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
-                {"tracks": [
-                    { "title": "A", "length": 20000 },
-                    { "title": "B", "length": 10666 },
-                    { "title": "C" }
-                ]}
-            ]}]}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            pick_by_duration(&releases.releases, &test_toc()),
-            Err(Error::NotFound)
-        ));
-    }
-
-    #[test]
-    fn pick_rejects_distant_durations() {
+    fn rank_keeps_distant_candidates() {
         let releases: MbReleaseList = serde_json::from_str(
             r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
                 {"tracks": [
@@ -584,10 +602,73 @@ mod tests {
             ]}]}"#,
         )
         .unwrap();
-        assert!(matches!(
-            pick_by_duration(&releases.releases, &test_toc()),
-            Err(Error::NotFound)
-        ));
+        // A release no tolerance would accept is still listed, so it can
+        // be chosen deliberately.
+        let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].meta.release_id, "r");
+        assert_eq!(ranked[0].max_diff, 180_000);
+    }
+
+    #[test]
+    fn rank_drops_track_count_mismatches() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"tracks": [ {"title": "A", "length": 20000}, {"title": "B", "length": 10666} ]}
+            ]}]}"#,
+        )
+        .unwrap();
+        assert!(rank_candidates(&releases.releases, &test_toc()).is_none());
+    }
+
+    #[test]
+    fn rank_drops_missing_lengths() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"tracks": [
+                    { "title": "A", "length": 20000 },
+                    { "title": "B", "length": 10666 },
+                    { "title": "C" }
+                ]}
+            ]}]}"#,
+        )
+        .unwrap();
+        assert!(rank_candidates(&releases.releases, &test_toc()).is_none());
+    }
+
+    #[test]
+    fn rank_keeps_the_best_medium_per_release() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"tracks": [
+                    { "title": "Wrong A", "length": 90000 },
+                    { "title": "Wrong B", "length": 90000 },
+                    { "title": "Wrong C", "length": 90000 }
+                ]},
+                {"tracks": [
+                    { "title": "Good A", "length": 20100 },
+                    { "title": "Good B", "length": 10600 },
+                    { "title": "Good C", "length": 11400 }
+                ]}
+            ]}]}"#,
+        )
+        .unwrap();
+        let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].max_diff, 100);
+        assert_eq!(ranked[0].meta.tracks[0].title, "Good A");
+    }
+
+    #[test]
+    fn score_medium_needs_every_length() {
+        let tracks: Vec<MbTrack> =
+            serde_json::from_str(r#"[{ "length": 20000 }, { "length": 10666 }]"#).unwrap();
+        assert_eq!(score_medium(&tracks, &[20_000, 10_666]), Some(0));
+        let tracks: Vec<MbTrack> =
+            serde_json::from_str(r#"[{ "length": 20000 }, { "length": 10666 }, { "title": "C" }]"#)
+                .unwrap();
+        assert_eq!(score_medium(&tracks, &[20_000, 10_666, 11_333]), None);
+        assert_eq!(score_medium(&tracks, &[20_000]), None);
     }
 
     #[test]

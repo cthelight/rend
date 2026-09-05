@@ -110,6 +110,22 @@ pub fn demo_meta() -> DiscMeta {
     }
 }
 
+/// A second candidate for the simulated disc, an "official reissue", so
+/// the candidate-switching flow can be exercised without a network.
+pub fn demo_meta_reissue() -> DiscMeta {
+    let mut meta = demo_meta();
+    meta.album = "Demo Album (Reissue)".into();
+    meta.year = Some("2025".into());
+    meta.release_id = "demo-release-reissue".into();
+    meta.tracks[2].title = "Short One (Reprise)".into();
+    meta
+}
+
+/// Every candidate for the simulated disc, best first.
+pub fn demo_meta_all() -> Vec<DiscMeta> {
+    vec![demo_meta(), demo_meta_reissue()]
+}
+
 /// A tiny 1x1 PNG used as the simulated disc's cover art.
 pub fn demo_cover() -> Vec<u8> {
     vec![
