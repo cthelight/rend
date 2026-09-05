@@ -40,7 +40,7 @@ uninstall:
 test:
 	$(CARGO) test --workspace
 
-## Run clippy lints (denying warnings, as in CI)
+## Run clippy lints (denying warnings)
 clippy:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
