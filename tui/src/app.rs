@@ -176,6 +176,8 @@ pub struct Drive {
     pub disc: Option<String>,
     device: Option<Device>,
     last_status: Option<DriveStatus>,
+    #[cfg(test)]
+    simulated_status: Option<DriveStatus>,
 }
 
 impl Drive {
@@ -187,6 +189,8 @@ impl Drive {
             disc: None,
             device: Some(device),
             last_status: None,
+            #[cfg(test)]
+            simulated_status: None,
         };
         drive.refresh();
         drive
@@ -200,6 +204,8 @@ impl Drive {
             disc: Some("audio".into()),
             device: None,
             last_status: Some(DriveStatus::DiscOk),
+            #[cfg(test)]
+            simulated_status: None,
         }
     }
 
@@ -208,7 +214,20 @@ impl Drive {
         self.device.is_none()
     }
 
+    /// Test seam: makes the next [`Drive::refresh`] report `status` instead
+    /// of querying the device.
+    #[cfg(test)]
+    fn simulate(&mut self, status: DriveStatus) {
+        self.simulated_status = Some(status);
+    }
+
     fn refresh(&mut self) {
+        #[cfg(test)]
+        if let Some(status) = self.simulated_status.take() {
+            self.status = status.to_string();
+            self.last_status = Some(status);
+            return;
+        }
         let Some(device) = self.device.as_ref() else {
             return;
         };
@@ -518,6 +537,12 @@ impl App {
             return;
         }
         self.drive_sel = idx;
+        self.load_disc();
+    }
+
+    /// Reads the selected drive's table of contents and starts its metadata
+    /// lookup, replacing whatever the drive showed before.
+    fn load_disc(&mut self) {
         self.track_sel = 0;
         self.tracks_scroll = 0;
         self.toc = None;
@@ -526,6 +551,7 @@ impl App {
         self.meta_sel = 0;
         self.cover = None;
         self.editing = None;
+        let idx = self.drive_sel;
         match self.drives[idx].toc() {
             Ok(toc) => {
                 self.disc_id = self.drives[idx].mcn();
@@ -534,6 +560,39 @@ impl App {
                 self.focus = Focus::Tracks;
             }
             Err(e) => self.status = Some(format!("no TOC: {e}")),
+        }
+    }
+
+    /// Forgets the loaded disc after the selected drive's state changed, so
+    /// the drive is read again on the next enter (or on disc insertion).
+    fn invalidate_disc(&mut self) {
+        let selected = self.drive_sel;
+        self.toc = None;
+        self.disc_id = None;
+        self.meta = None;
+        self.meta_sel = 0;
+        self.cover = None;
+        self.editing = None;
+        self.meta_rx = None;
+        self.meta_tx = None;
+        self.meta_gen += 1;
+        if let Some(rip) = self.rips.get_mut(&selected) {
+            rip.state.states.clear();
+        }
+        let path = self.drives[selected].path.clone();
+        self.status = Some(format!(
+            "disc state changed on {path} — press enter to reload"
+        ));
+    }
+
+    /// Reacts to the selected drive's status having changed.
+    fn selected_status_changed(&mut self, now: Option<DriveStatus>) {
+        match now {
+            // A disc appeared in the selected, empty drive: read it.
+            Some(DriveStatus::DiscOk) if self.toc.is_none() => self.load_disc(),
+            // A loaded TOC is stale: forget it.
+            _ if self.toc.is_some() => self.invalidate_disc(),
+            _ => {}
         }
     }
 
@@ -1147,38 +1206,26 @@ impl App {
         }
     }
 
-    /// Re-queries drive statuses; invalidates the TOC if the disc changed.
+    /// Re-queries drive statuses, and reacts when the selected drive's disc
+    /// state changed: a newly inserted disc is loaded automatically, a
+    /// removed (or changed) one invalidates the loaded TOC.
     pub fn refresh_drives(&mut self) {
         if self.drives.iter().all(Drive::is_demo) || self.any_rip_active() {
             return;
         }
         let selected = self.drive_sel;
-        let mut changed = false;
+        let mut changed_to: Option<Option<DriveStatus>> = None;
         for (i, drive) in self.drives.iter_mut().enumerate() {
             let prev = drive.last_status;
             drive.refresh();
-            if i == selected && self.toc.is_some() && prev != drive.last_status {
-                changed = true;
+            if i == selected && prev != drive.last_status {
+                changed_to = Some(drive.last_status);
             }
         }
-        if changed {
-            self.toc = None;
-            self.disc_id = None;
-            self.meta = None;
-            self.meta_sel = 0;
-            self.cover = None;
-            self.editing = None;
-            self.meta_rx = None;
-            self.meta_tx = None;
-            self.meta_gen += 1;
-            if let Some(rip) = self.rips.get_mut(&selected) {
-                rip.state.states.clear();
-            }
-            let path = self.drives[selected].path.clone();
-            self.status = Some(format!(
-                "disc state changed on {path} — press enter to reload"
-            ));
-        }
+        let Some(now) = changed_to else {
+            return;
+        };
+        self.selected_status_changed(now);
     }
 
     /// Stops every in-flight rip and waits for all workers to exit.
@@ -1961,6 +2008,87 @@ mod tests {
         app.rip_selected_track();
         assert!(!app.drive_ripping(app.drive_sel));
         assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn inserted_disc_on_the_selected_drive_loads_automatically() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        // The drive was selected while empty: no TOC was loaded.
+        app.toc = None;
+        app.disc_id = None;
+        app.meta = None;
+        app.cover = None;
+        app.focus = Focus::Drives;
+
+        app.selected_status_changed(Some(DriveStatus::DiscOk));
+
+        // The disc was read and its metadata applied, as if enter had been
+        // pressed.
+        assert!(app.toc.is_some());
+        assert_eq!(app.disc_id.as_deref(), Some(DEMO_MCN));
+        assert_eq!(app.selected_meta().unwrap().album, "Demo Album");
+        assert!(app.cover.is_some());
+        assert_eq!(app.focus, Focus::Tracks);
+    }
+
+    #[test]
+    fn removed_disc_invalidates_the_loaded_toc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        assert!(app.toc.is_some());
+
+        app.selected_status_changed(Some(DriveStatus::NoDisc));
+
+        assert!(app.toc.is_none());
+        assert!(app.meta.is_none());
+        assert!(app.cover.is_none());
+        assert!(app.disc_id.is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("press enter to reload"))
+        );
+    }
+
+    #[test]
+    fn refresh_drives_loads_a_freshly_inserted_disc() {
+        let dir = tempfile::tempdir().unwrap();
+        // A "drive" that is really a plain file: its CD-ROM ioctls fail, but
+        // it stands in for a real device whose state changes between polls.
+        let media = dir.path().join("media");
+        std::fs::write(&media, []).unwrap();
+        let mut app = App::new(
+            Some(media.to_str().unwrap()),
+            dir.path().to_path_buf(),
+            false,
+            Format::default(),
+            Template::default(),
+            false,
+        );
+        // Selected while empty: the TOC read failed.
+        assert!(app.toc.is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("no TOC"))
+        );
+
+        // The drive reports a disc on the next poll.
+        app.status = Some("sentinel".into());
+        app.drives[0].simulate(DriveStatus::DiscOk);
+        app.refresh_drives();
+
+        // The insertion was detected and the drive was re-read: the sentinel
+        // was replaced by the (failed, hardware-less) TOC attempt, and the
+        // drive row shows the disc.
+        assert_ne!(app.status.as_deref(), Some("sentinel"));
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("no TOC"))
+        );
+        assert_eq!(app.drives[0].status, "disc present");
     }
 
     /// A TOC panel rect whose inner rows start at y = 4.
