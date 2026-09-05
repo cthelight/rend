@@ -13,7 +13,9 @@ use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
 use rend_encode::{Format, ffmpeg_available};
-use rend_meta::{DiscMeta, DiscToc, Template, TrackMeta, cover_art, lookup_disc_all};
+use rend_meta::{
+    Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
+};
 
 use crate::demo::{
     DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta_all,
@@ -361,13 +363,18 @@ pub struct MetaEdit {
 /// The outcome of a background metadata lookup. `id` records which lookup
 /// produced it, so results from a previous disc can be discarded.
 enum MetaEvent {
-    /// The candidate list arrived, best first.
-    Candidates { id: u64, candidates: Vec<DiscMeta> },
+    /// The candidate list arrived, best first. `toc` keys the answer in
+    /// the cache when it lands.
+    Candidates {
+        id: u64,
+        toc: DiscToc,
+        candidates: Vec<Candidate>,
+    },
     /// Cover art for the given release arrived.
     Cover {
         id: u64,
         release_id: String,
-        cover: Option<Vec<u8>>,
+        cover: Result<Option<Vec<u8>>, String>,
     },
     /// The lookup failed.
     Failed { id: u64, reason: String },
@@ -412,6 +419,9 @@ pub struct App {
     meta_tx: Option<mpsc::Sender<MetaEvent>>,
     /// Generation counter invalidating in-flight lookups on disc changes.
     meta_gen: u64,
+    /// Lookups and covers this session has already fetched, so re-reading
+    /// a known disc skips the network.
+    meta_cache: MetaCache,
     pub track_sel: usize,
     pub tracks_scroll: usize,
     /// Rips keyed by drive index; several drives can rip at once.
@@ -453,6 +463,7 @@ impl App {
             meta_rx: None,
             meta_tx: None,
             meta_gen: 0,
+            meta_cache: MetaCache::new(),
             track_sel: 0,
             tracks_scroll: 0,
             rips: HashMap::new(),
@@ -549,6 +560,12 @@ impl App {
             offsets: lbas,
             leadout: toc.leadout_lba,
         };
+        // A disc this session has already looked up is answered from
+        // memory, cover included.
+        if let Some(candidates) = self.meta_cache.candidates(&disc_toc).map(|c| c.to_vec()) {
+            self.apply_cached_meta(&candidates);
+            return;
+        }
         let lookup_id = self.meta_gen + 1;
         self.meta_gen = lookup_id;
         self.status = Some("looking up metadata…".into());
@@ -558,7 +575,7 @@ impl App {
         std::thread::Builder::new()
             .name("rend-meta-lookup".into())
             .spawn(move || {
-                let candidates = match lookup_disc_all(&disc_toc) {
+                let candidates = match lookup_candidates(&disc_toc) {
                     Ok(candidates) => candidates,
                     Err(e) => {
                         let _ = tx.send(MetaEvent::Failed {
@@ -570,10 +587,24 @@ impl App {
                 };
                 let _ = tx.send(MetaEvent::Candidates {
                     id: lookup_id,
+                    toc: disc_toc,
                     candidates,
                 });
             })
             .ok();
+    }
+
+    /// Applies a candidate list that is already in the cache: the
+    /// candidates and their status immediately, the selected candidate's
+    /// cover through [`Self::fetch_cover`], which hits the cover cache.
+    fn apply_cached_meta(&mut self, candidates: &[Candidate]) {
+        if candidates.is_empty() {
+            self.status = Some("no release matched the disc".into());
+        } else {
+            self.meta = Some(candidates.iter().map(|c| c.meta.clone()).collect());
+            self.status = Some(self.match_status().unwrap_or_default());
+            self.fetch_cover();
+        }
     }
 
     /// Applies pending metadata-lookup results for the selected disc.
@@ -587,11 +618,23 @@ impl App {
         }
         for event in events {
             match event {
-                MetaEvent::Candidates { id, candidates } => {
-                    if id != self.meta_gen || candidates.is_empty() {
+                MetaEvent::Candidates {
+                    id,
+                    toc,
+                    candidates,
+                } => {
+                    // The answer is definitive for this session even when
+                    // stale (a newer lookup supersedes it) or empty (no
+                    // match is not worth retrying).
+                    self.meta_cache.insert(toc, candidates.clone());
+                    if id != self.meta_gen {
                         continue;
                     }
-                    self.meta = Some(candidates);
+                    if candidates.is_empty() {
+                        self.status = Some("no release matched the disc".into());
+                        continue;
+                    }
+                    self.meta = Some(candidates.into_iter().map(|c| c.meta).collect());
                     self.status = Some(self.match_status().unwrap_or_default());
                     self.fetch_cover();
                 }
@@ -607,8 +650,21 @@ impl App {
                     let current = self
                         .selected_meta()
                         .is_some_and(|d| d.release_id == release_id);
-                    if current {
-                        self.cover = cover;
+                    match cover {
+                        Ok(cover) => {
+                            // Remember the cover, or its absence, for this
+                            // release.
+                            self.meta_cache
+                                .cover_insert(release_id.clone(), cover.clone());
+                            if current {
+                                self.cover = cover;
+                            }
+                        }
+                        Err(reason) => {
+                            if current {
+                                self.status = Some(format!("cover art unavailable: {reason}"));
+                            }
+                        }
                     }
                     self.meta_rx = None;
                     self.meta_tx = None;
@@ -691,6 +747,12 @@ impl App {
             self.cover = Some(demo_cover());
             return;
         }
+        // A cover this session has already fetched (or found absent) for
+        // the release is answered from memory.
+        if let Some(cover) = self.meta_cache.cover(&disc.release_id) {
+            self.cover = cover.clone();
+            return;
+        }
         if self.meta_tx.is_none() {
             let (tx, rx) = mpsc::channel();
             self.meta_tx = Some(tx.clone());
@@ -702,7 +764,7 @@ impl App {
         std::thread::Builder::new()
             .name("rend-cover".into())
             .spawn(move || {
-                let cover = cover_art(&release_id).ok().flatten();
+                let cover = cover_art(&release_id).map_err(|e| e.to_string());
                 let _ = tx.send(MetaEvent::Cover {
                     id,
                     release_id,
@@ -2041,5 +2103,163 @@ mod tests {
         state.states[0] = TrackState::Skipped("output exists".into());
         let (done, _) = state.totals(&toc, &tracks);
         assert_eq!(done, pcm_of(&toc, n1) + pcm_of(&toc, n2) / 2);
+    }
+
+    fn meta_with(release_id: &str, album: &str) -> DiscMeta {
+        DiscMeta {
+            album: album.into(),
+            artist: "The Band".into(),
+            album_artist: None,
+            year: None,
+            release_id: release_id.into(),
+            tracks: vec![],
+        }
+    }
+
+    fn candidate(release_id: &str, album: &str) -> Candidate {
+        Candidate {
+            meta: meta_with(release_id, album),
+            max_diff_ms: 0,
+        }
+    }
+
+    fn cached_toc() -> DiscToc {
+        DiscToc {
+            offsets: vec![150, 1650],
+            leadout: 3300,
+        }
+    }
+
+    #[test]
+    fn cached_meta_is_applied_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.meta = None;
+        app.cover = None;
+        let toc = cached_toc();
+        app.meta_cache
+            .insert(toc.clone(), vec![candidate("rel-1", "Cached Album")]);
+
+        let cached = app.meta_cache.candidates(&toc).unwrap().to_vec();
+        app.apply_cached_meta(&cached);
+
+        assert_eq!(app.meta.as_ref().unwrap()[0].album, "Cached Album");
+        assert!(app.status.is_some());
+        // The demo drive's cover stands in for the fetched one.
+        assert!(app.cover.is_some());
+    }
+
+    #[test]
+    fn cached_empty_meta_reports_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.meta = None;
+        let toc = cached_toc();
+        app.meta_cache.insert(toc.clone(), vec![]);
+
+        let cached = app.meta_cache.candidates(&toc).unwrap().to_vec();
+        app.apply_cached_meta(&cached);
+
+        assert!(app.meta.is_none());
+        assert_eq!(app.status.as_deref(), Some("no release matched the disc"));
+    }
+
+    #[test]
+    fn candidates_event_is_cached_and_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let (tx, rx) = mpsc::channel();
+        app.meta_rx = Some(rx);
+        app.meta_gen = 1;
+        app.meta = None;
+        let toc = cached_toc();
+
+        tx.send(MetaEvent::Candidates {
+            id: 1,
+            toc: toc.clone(),
+            candidates: vec![candidate("rel-1", "Cached Album")],
+        })
+        .unwrap();
+        app.drain_meta_events();
+
+        assert_eq!(app.meta.as_ref().unwrap()[0].album, "Cached Album");
+        assert_eq!(app.meta_cache.candidates(&toc).map(|c| c.len()), Some(1));
+    }
+
+    #[test]
+    fn a_stale_candidates_event_still_fills_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let (tx, rx) = mpsc::channel();
+        app.meta_rx = Some(rx);
+        app.meta_gen = 2; // a newer lookup has superseded this one
+        app.meta = None;
+        let toc = cached_toc();
+
+        tx.send(MetaEvent::Candidates {
+            id: 1,
+            toc: toc.clone(),
+            candidates: vec![candidate("rel-1", "Cached Album")],
+        })
+        .unwrap();
+        app.drain_meta_events();
+
+        // Not applied to the (newer) selection…
+        assert!(app.meta.is_none());
+        // …but remembered for the session anyway.
+        assert!(app.meta_cache.candidates(&toc).is_some());
+    }
+
+    #[test]
+    fn cover_event_is_cached_per_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let (tx, rx) = mpsc::channel();
+        app.meta_rx = Some(rx);
+        app.meta_tx = Some(tx.clone());
+        app.meta_gen = 1;
+        app.meta = Some(vec![meta_with("rel-1", "The Album")]);
+
+        tx.send(MetaEvent::Cover {
+            id: 1,
+            release_id: "rel-1".into(),
+            cover: Ok(Some(vec![9, 8, 7])),
+        })
+        .unwrap();
+        app.drain_meta_events();
+
+        assert_eq!(app.cover.as_deref(), Some(&[9, 8, 7][..]));
+        assert_eq!(app.meta_cache.cover("rel-1"), Some(&Some(vec![9u8, 8, 7])));
+        // The lookup channel is done once the cover lands.
+        assert!(app.meta_rx.is_none());
+        assert!(app.meta_tx.is_none());
+        drop(tx);
+    }
+
+    #[test]
+    fn cover_error_reports_status_for_the_selected_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let (tx, rx) = mpsc::channel();
+        app.meta_rx = Some(rx);
+        app.meta_tx = Some(tx.clone());
+        app.meta_gen = 1;
+        app.meta = Some(vec![meta_with("rel-1", "The Album")]);
+
+        tx.send(MetaEvent::Cover {
+            id: 1,
+            release_id: "rel-1".into(),
+            cover: Err("network error: host not found".into()),
+        })
+        .unwrap();
+        app.drain_meta_events();
+
+        assert_eq!(
+            app.status.as_deref(),
+            Some("cover art unavailable: network error: host not found")
+        );
+        // A failed fetch is not cached, so a retry can still reach it.
+        assert!(app.meta_cache.cover("rel-1").is_none());
+        drop(tx);
     }
 }

@@ -2,14 +2,15 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::result::Result;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::Parser;
 use rend_core::{CddaStream, Device, Error, FRAME_SIZE, FRAMES_PER_SECOND, Toc, Track};
 use rend_encode::{Format, ffmpeg_available};
 use rend_meta::{
-    DEFAULT_TEMPLATE, DiscMeta, DiscToc, Template, TrackTags, apply, cover_art, disc_id,
-    lookup_disc, lookup_disc_all,
+    Candidate, DEFAULT_TEMPLATE, DiscMeta, DiscToc, MetaCache, Template, TrackTags, apply,
+    cover_art, disc_id, lookup_candidates,
 };
 
 #[derive(Parser)]
@@ -212,44 +213,36 @@ fn cmd_info(device: Option<&str>, matches: bool, r#match: Option<usize>) -> Resu
         offsets: lbas,
         leadout: toc.leadout_lba,
     };
+    let candidates =
+        lookup_candidates(&toc_).map_err(|e| Error::Unexpected(lookup_error(e, &id)))?;
+    println!("disc id    {id}");
 
     if let Some(n) = r#match {
-        let candidates =
-            lookup_disc_all(&toc_).map_err(|e| Error::Unexpected(lookup_error(e, &id)))?;
         let disc = nth_candidate(&candidates, n)?;
-        println!("disc id    {id}");
         print_match(disc, None);
         return Ok(());
     }
     if matches {
-        let candidates =
-            lookup_disc_all(&toc_).map_err(|e| Error::Unexpected(lookup_error(e, &id)))?;
-        println!("disc id    {id}");
-        for (i, disc) in candidates.iter().enumerate() {
-            print_match(disc, Some((i + 1, candidates.len())));
+        for (i, candidate) in candidates.iter().enumerate() {
+            print_match(&candidate.meta, Some((i + 1, candidates.len())));
         }
         return Ok(());
     }
 
-    let disc = match lookup_disc(&toc_) {
-        Ok(disc) => disc,
-        Err(rend_meta::lookup::Error::NotFound) => {
-            // The disc may still have a close-but-distant candidate the
-            // default lookup is not willing to accept.
-            let n = lookup_disc_all(&toc_).map(|c| c.len()).unwrap_or(0);
-            let hint = if n > 0 {
-                format!("; `rend info --matches` lists {n} close candidate(s)")
-            } else {
-                " (is it a commercial disc?)".into()
-            };
-            return Err(Error::Unexpected(format!(
-                "no release matched disc {id}{hint}"
-            )));
-        }
-        Err(e) => return Err(Error::Unexpected(lookup_error(e, &id))),
+    // The disc may still have a close-but-distant candidate the default
+    // lookup is not willing to accept.
+    let Some(disc) = candidates.iter().find(|c| c.accepted()) else {
+        let n = candidates.len();
+        let hint = if n > 0 {
+            format!("; `rend info --matches` lists {n} close candidate(s)")
+        } else {
+            " (is it a commercial disc?)".into()
+        };
+        return Err(Error::Unexpected(format!(
+            "no release matched disc {id}{hint}"
+        )));
     };
-    println!("disc id    {id}");
-    print_match(&disc, None);
+    print_match(&disc.meta, None);
     Ok(())
 }
 
@@ -283,11 +276,11 @@ fn lookup_error(e: rend_meta::lookup::Error, id: &str) -> String {
 }
 
 /// The `n`th (1-based) candidate, if the list is long enough.
-fn nth_candidate(candidates: &[DiscMeta], n: usize) -> Result<&DiscMeta, Error> {
+fn nth_candidate(candidates: &[Candidate], n: usize) -> Result<&DiscMeta, Error> {
     let Some(i) = n.checked_sub(1) else {
         return Err(Error::Unexpected("--match numbers start at 1".into()));
     };
-    candidates.get(i).ok_or_else(|| {
+    candidates.get(i).map(|c| &c.meta).ok_or_else(|| {
         Error::Unexpected(format!(
             "no candidate {n}: the disc has {count} candidate match(es); see `rend info --matches`",
             count = candidates.len()
@@ -304,6 +297,8 @@ struct RipOptions {
     r#match: Option<usize>,
     prefix: String,
     progress: bool,
+    /// The lookups this run has already made, shared by every worker.
+    cache: Arc<Mutex<MetaCache>>,
 }
 
 fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
@@ -326,6 +321,8 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
     let template = Template::parse(template)
         .map_err(|e| Error::Unexpected(format!("invalid --template: {e}")))?;
     let resolved = rip_devices(devices, *all)?;
+    // Every worker looks the disc up once; the rest hit this cache.
+    let cache = Arc::new(Mutex::new(MetaCache::new()));
 
     // One drive keeps the flat layout; several get a subdirectory each, named
     // after the device (e.g. `sr0`), so track files never collide.
@@ -357,6 +354,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
                 r#match: *r#match,
                 prefix,
                 progress: !multi,
+                cache: Arc::clone(&cache),
             };
             (dev, dir, opts)
         })
@@ -450,9 +448,9 @@ fn rip_device(
     let metadata = if opts.no_metadata {
         None
     } else if let Some(n) = opts.r#match {
-        Some(resolve_match(&toc, n, prefix)?)
+        Some(resolve_match(&toc, n, prefix, &opts.cache)?)
     } else {
-        lookup_metadata(&toc, prefix)
+        lookup_metadata(&toc, prefix, &opts.cache)
     };
 
     dev.spin_up().ok();
@@ -557,26 +555,89 @@ fn rip_track(
     file.finish()
 }
 
+/// The candidates for `toc`, from the shared cache or a fresh lookup.
+///
+/// The lock is held only while consulting and updating the cache, never
+/// across the network. A failed lookup is not cached, so a retry can still
+/// reach the network; a successful one (even an empty list) is.
+fn candidates_with_cache(
+    cache: &Mutex<MetaCache>,
+    toc: &DiscToc,
+) -> Result<Vec<Candidate>, rend_meta::lookup::Error> {
+    if let Some(candidates) = cache.lock().unwrap().candidates(toc) {
+        return Ok(candidates.to_vec());
+    }
+    let candidates = lookup_candidates(toc)?;
+    cache
+        .lock()
+        .unwrap()
+        .insert(toc.clone(), candidates.clone());
+    Ok(candidates)
+}
+
+/// The accepted match for `toc`, from the shared cache or a fresh lookup.
+///
+/// The same semantics as `lookup_disc`, but a disc this run has already
+/// looked up never goes to the network again.
+fn lookup_accepted(
+    cache: &Mutex<MetaCache>,
+    toc: &DiscToc,
+) -> Result<DiscMeta, rend_meta::lookup::Error> {
+    let candidates = candidates_with_cache(cache, toc)?;
+    candidates
+        .into_iter()
+        .find(|c| c.accepted())
+        .map(|c| c.meta)
+        .ok_or(rend_meta::lookup::Error::NotFound)
+}
+
+/// The cover for `release_id`, from the shared cache or a fresh fetch.
+///
+/// As with [`candidates_with_cache`], the lock never spans the network,
+/// and a failed fetch is not cached.
+fn cover_art_cached(
+    cache: &Mutex<MetaCache>,
+    release_id: &str,
+) -> Result<Option<Vec<u8>>, rend_meta::lookup::Error> {
+    if let Some(art) = cache.lock().unwrap().cover(release_id) {
+        return Ok(art.clone());
+    }
+    let art = cover_art(release_id)?;
+    cache
+        .lock()
+        .unwrap()
+        .cover_insert(release_id.to_string(), art.clone());
+    Ok(art)
+}
+
 /// Looks up the disc's metadata and cover art for the given TOC.
 ///
-/// Any failure (no match, no network, …) is reported as a warning and yields
-/// `None`, since a missing lookup must not stop a rip.
-fn lookup_metadata(toc: &Toc, prefix: &str) -> Option<(DiscMeta, Option<Vec<u8>>)> {
+/// A disc this run has already looked up is answered from the shared
+/// cache. Any failure (no match, no network, …) is reported as a warning
+/// and yields `None`, since a missing lookup must not stop a rip.
+fn lookup_metadata(
+    toc: &Toc,
+    prefix: &str,
+    cache: &Mutex<MetaCache>,
+) -> Option<(DiscMeta, Option<Vec<u8>>)> {
     let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
     if lbas.is_empty() {
         return None;
     }
-    let disc = match lookup_disc(&DiscToc {
-        offsets: lbas,
-        leadout: toc.leadout_lba,
-    }) {
+    let disc = match lookup_accepted(
+        cache,
+        &DiscToc {
+            offsets: lbas,
+            leadout: toc.leadout_lba,
+        },
+    ) {
         Ok(disc) => disc,
         Err(e) => {
             eprintln!("{prefix}metadata lookup failed: {e}");
             return None;
         }
     };
-    let art = match cover_art(&disc.release_id) {
+    let art = match cover_art_cached(cache, &disc.release_id) {
         Ok(art) => art,
         Err(e) => {
             eprintln!("{prefix}cover art lookup failed: {e}");
@@ -601,16 +662,24 @@ fn lookup_metadata(toc: &Toc, prefix: &str) -> Option<(DiscMeta, Option<Vec<u8>>
 /// Unlike [`lookup_metadata`], any failure is an error rather than a
 /// warning: an explicitly requested match must not be silently replaced by
 /// the default one.
-fn resolve_match(toc: &Toc, n: usize, prefix: &str) -> Result<(DiscMeta, Option<Vec<u8>>), Error> {
+fn resolve_match(
+    toc: &Toc,
+    n: usize,
+    prefix: &str,
+    cache: &Mutex<MetaCache>,
+) -> Result<(DiscMeta, Option<Vec<u8>>), Error> {
     let lbas: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
     let id = disc_id(&lbas);
-    let candidates = lookup_disc_all(&DiscToc {
-        offsets: lbas,
-        leadout: toc.leadout_lba,
-    })
+    let candidates = candidates_with_cache(
+        cache,
+        &DiscToc {
+            offsets: lbas,
+            leadout: toc.leadout_lba,
+        },
+    )
     .map_err(|e| Error::Unexpected(format!("{prefix}{}", lookup_error(e, &id))))?;
     let disc = nth_candidate(&candidates, n)?;
-    let art = cover_art(&disc.release_id)
+    let art = cover_art_cached(cache, &disc.release_id)
         .map_err(|e| Error::Unexpected(format!("{prefix}cover art lookup failed: {e}")))?;
     eprintln!(
         "{prefix}{} — {}{}",
@@ -678,31 +747,65 @@ mod tests {
         assert_eq!(fmt_duration(FRAMES_PER_SECOND * 60 + 37), "1:00");
     }
 
+    fn candidate(release_id: &str) -> Candidate {
+        Candidate {
+            meta: DiscMeta {
+                album: "The Album".into(),
+                artist: "The Band".into(),
+                album_artist: None,
+                year: None,
+                release_id: release_id.into(),
+                tracks: vec![],
+            },
+            max_diff_ms: 0,
+        }
+    }
+
     #[test]
     fn nth_candidate_is_one_based() {
-        let one = DiscMeta {
-            album: "A".into(),
-            artist: "B".into(),
-            album_artist: None,
-            year: None,
-            release_id: "r1".into(),
-            tracks: vec![],
-        };
-        let two = DiscMeta {
-            album: "C".into(),
-            artist: "B".into(),
-            album_artist: None,
-            year: None,
-            release_id: "r2".into(),
-            tracks: vec![],
-        };
-        let candidates = [one.clone(), two.clone()];
+        let candidates = [candidate("r1"), candidate("r2")];
         assert_eq!(nth_candidate(&candidates, 1).unwrap().release_id, "r1");
         assert_eq!(nth_candidate(&candidates, 2).unwrap().release_id, "r2");
         assert!(nth_candidate(&candidates, 0).is_err());
         assert!(nth_candidate(&candidates, 3).is_err());
-        let none: [DiscMeta; 0] = [];
+        let none: [Candidate; 0] = [];
         assert!(nth_candidate(&none, 1).is_err());
+    }
+
+    #[test]
+    fn a_cached_disc_is_served_without_the_network() {
+        let cache = Mutex::new(MetaCache::new());
+        let toc = DiscToc {
+            offsets: vec![150, 1650],
+            leadout: 3300,
+        };
+        cache
+            .lock()
+            .unwrap()
+            .insert(toc.clone(), vec![candidate("r1")]);
+
+        // A cached disc never touches the network: the candidates come
+        // straight from the cache.
+        let found = candidates_with_cache(&cache, &toc).unwrap();
+        assert_eq!(found[0].meta.release_id, "r1");
+        assert!(lookup_accepted(&cache, &toc).unwrap().release_id == "r1");
+
+        // A cached "no match" stays a no-match, not a fetch.
+        let other = DiscToc {
+            offsets: vec![150, 1650, 2450],
+            leadout: 3300,
+        };
+        cache.lock().unwrap().insert(other.clone(), vec![]);
+        assert!(lookup_accepted(&cache, &other).is_err());
+
+        // A cached cover is served the same way, absence included.
+        cache
+            .lock()
+            .unwrap()
+            .cover_insert("r1".into(), Some(vec![1, 2]));
+        assert_eq!(cover_art_cached(&cache, "r1").unwrap(), Some(vec![1, 2]));
+        cache.lock().unwrap().cover_insert("r2".into(), None);
+        assert_eq!(cover_art_cached(&cache, "r2").unwrap(), None);
     }
 
     #[test]

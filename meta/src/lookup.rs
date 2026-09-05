@@ -9,7 +9,9 @@
 //! keeping the one whose medium's durations come closest.
 //! [`lookup_disc`] returns that best match; [`lookup_disc_all`] lists
 //! every candidate, best first, so a worse match can be chosen
-//! deliberately. The matched release yields album, artist, year, and
+//! deliberately, and [`lookup_candidates`] exposes the same candidates
+//! with how far off each one is. The matched release yields album,
+//! artist, year, and
 //! track titles, plus a release id that [`cover_art`] uses to fetch the
 //! front cover from the Cover Art Archive.
 
@@ -35,7 +37,7 @@ const DEBIAS: u32 = 150;
 const FUZZY_TOLERANCE_MS: u64 = 5_000;
 
 /// The disc's track layout, in LBA units.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiscToc {
     /// Start LBA of each audio track, in disc order.
     pub offsets: Vec<u32>,
@@ -103,6 +105,21 @@ fn agent() -> Agent {
     Agent::new_with_config(config)
 }
 
+/// A candidate match and how far off its worst track's duration is, in
+/// milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub meta: DiscMeta,
+    pub max_diff_ms: u64,
+}
+
+impl Candidate {
+    /// Whether the match is close enough to trust without asking.
+    pub fn accepted(&self) -> bool {
+        self.max_diff_ms <= FUZZY_TOLERANCE_MS
+    }
+}
+
 /// Looks up the disc with layout `toc` on MusicBrainz.
 ///
 /// An exact disc-id hit is returned as-is. Otherwise the disc's track
@@ -111,11 +128,11 @@ fn agent() -> Agent {
 /// [`FUZZY_TOLERANCE_MS`] of the disc's; a closer-but-distant release is
 /// no match, and [`lookup_disc_all`] can be used to see it anyway.
 pub fn lookup_disc(toc: &DiscToc) -> Result<DiscMeta, Error> {
-    let candidate = candidates(toc)?
+    lookup_candidates(toc)?
         .into_iter()
-        .find(|c| c.max_diff <= FUZZY_TOLERANCE_MS)
-        .ok_or(Error::NotFound)?;
-    Ok(candidate.meta)
+        .find(|c| c.accepted())
+        .map(|c| c.meta)
+        .ok_or(Error::NotFound)
 }
 
 /// Looks up the disc with layout `toc` and returns every candidate match,
@@ -127,13 +144,22 @@ pub fn lookup_disc(toc: &DiscToc) -> Result<DiscMeta, Error> {
 /// ranked by the worst per-track duration difference. No tolerance
 /// applies — a distant release is still a candidate.
 pub fn lookup_disc_all(toc: &DiscToc) -> Result<Vec<DiscMeta>, Error> {
-    Ok(candidates(toc)?.into_iter().map(|c| c.meta).collect())
+    Ok(lookup_candidates(toc)?
+        .into_iter()
+        .map(|c| c.meta)
+        .collect())
 }
 
-/// A candidate match with how far off its worst track's duration is.
-struct Candidate {
-    meta: DiscMeta,
-    max_diff: u64,
+/// Every candidate match for the disc with layout `toc`, best first.
+///
+/// An exact disc-id hit yields a single candidate with a zero difference.
+/// Otherwise the disc's track durations are matched against candidate
+/// releases; every release whose medium has the right track count and
+/// known durations is listed, ranked by the worst per-track duration
+/// difference. No tolerance applies — a distant release is still a
+/// candidate.
+pub fn lookup_candidates(toc: &DiscToc) -> Result<Vec<Candidate>, Error> {
+    candidates(toc)
 }
 
 /// Finds every candidate for the disc: first an exact disc-id hit (the
@@ -145,7 +171,10 @@ fn candidates(toc: &DiscToc) -> Result<Vec<Candidate>, Error> {
         let id = mb_discid(toc.leadout + debias, &offsets);
         match lookup_cdtoc(&id) {
             Ok(Some(meta)) => {
-                return Ok(vec![Candidate { meta, max_diff: 0 }]);
+                return Ok(vec![Candidate {
+                    meta,
+                    max_diff_ms: 0,
+                }]);
             }
             Ok(None) | Err(Error::NotFound) => {}
             Err(e) => return Err(e),
@@ -240,15 +269,15 @@ fn rank_candidates(releases: &[MbRelease], toc: &DiscToc) -> Option<Vec<Candidat
                 best = Some((diff, medium));
             }
         }
-        if let Some((max_diff, medium)) = best {
+        if let Some((max_diff_ms, medium)) = best {
             ranked.push(Candidate {
                 meta: to_disc_meta(release, Some(medium)),
-                max_diff,
+                max_diff_ms,
             });
         }
     }
     (!ranked.is_empty()).then(|| {
-        ranked.sort_by_key(|c| c.max_diff);
+        ranked.sort_by_key(|c| c.max_diff_ms);
         ranked
     })
 }
@@ -585,13 +614,15 @@ mod tests {
         let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
 
         assert_eq!(ranked.len(), 2);
-        assert_eq!(ranked[0].max_diff, 100);
+        assert_eq!(ranked[0].max_diff_ms, 100);
         assert_eq!(ranked[0].meta.release_id, "rel-right");
         assert_eq!(ranked[0].meta.album, "Right Album");
         assert_eq!(ranked[0].meta.year.as_deref(), Some("1998"));
         assert_eq!(ranked[0].meta.tracks[0].title, "A");
+        assert!(ranked[0].accepted());
         // The distant release is still a candidate, ranked last.
-        assert_eq!(ranked[1].max_diff, 180_000);
+        assert_eq!(ranked[1].max_diff_ms, 180_000);
+        assert!(!ranked[1].accepted());
         assert_eq!(ranked[1].meta.release_id, "rel-wrong");
     }
 
@@ -612,7 +643,8 @@ mod tests {
         let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].meta.release_id, "r");
-        assert_eq!(ranked[0].max_diff, 180_000);
+        assert_eq!(ranked[0].max_diff_ms, 180_000);
+        assert!(!ranked[0].accepted());
     }
 
     #[test]
@@ -660,8 +692,43 @@ mod tests {
         .unwrap();
         let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
         assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].max_diff, 100);
+        assert_eq!(ranked[0].max_diff_ms, 100);
         assert_eq!(ranked[0].meta.tracks[0].title, "Good A");
+    }
+
+    #[test]
+    fn acceptance_needs_every_track_within_tolerance() {
+        let meta = DiscMeta {
+            album: "The Album".into(),
+            artist: "The Band".into(),
+            album_artist: None,
+            year: None,
+            release_id: "rel-1".into(),
+            tracks: vec![],
+        };
+        // An exact hit and a boundary hit are accepted.
+        assert!(
+            Candidate {
+                meta: meta.clone(),
+                max_diff_ms: 0
+            }
+            .accepted()
+        );
+        assert!(
+            Candidate {
+                meta: meta.clone(),
+                max_diff_ms: FUZZY_TOLERANCE_MS
+            }
+            .accepted()
+        );
+        // One millisecond past the tolerance is not.
+        assert!(
+            !Candidate {
+                meta,
+                max_diff_ms: FUZZY_TOLERANCE_MS + 1
+            }
+            .accepted()
+        );
     }
 
     #[test]

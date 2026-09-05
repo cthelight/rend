@@ -73,6 +73,11 @@ durations come to the disc's and uses the best one. `rend info --matches`
 lists every candidate, and `rend info --match N` or `rend rip --match N`
 deliberately picks the Nth one (1 is the best).
 
+A disc's lookup (keyed by its track layout) and a release's cover art are
+remembered for the run — or the TUI session — so the same disc is never
+fetched twice: re-ripping a disc, or several parallel drives reading the
+same one, costs one lookup.
+
 ### Ripping several drives in parallel
 
 Pass `-d` more than once (or `--all`) and `rip` reads every drive at
