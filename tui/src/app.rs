@@ -15,6 +15,7 @@ use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
 use rend_encode::{Format, ffmpeg_available};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
+    register_disc_id_url,
 };
 
 use crate::demo::{
@@ -435,6 +436,8 @@ pub struct App {
     pub running: bool,
     /// The keybinds help window, opened with `?`.
     pub help: bool,
+    /// The register-disc-id URL window, opened with `u`.
+    pub url_modal: bool,
     pub focus: Focus,
     pub drives: Vec<Drive>,
     pub drive_sel: usize,
@@ -491,6 +494,7 @@ impl App {
         let mut app = Self {
             running: true,
             help: false,
+            url_modal: false,
             focus: Focus::Drives,
             drives: Vec::new(),
             drive_sel: 0,
@@ -578,6 +582,7 @@ impl App {
         self.meta_sel = 0;
         self.cover = None;
         self.editing = None;
+        self.url_modal = false;
         self.remember_album();
         let idx = self.drive_sel;
         if self.drives[idx].is_demo() {
@@ -629,6 +634,7 @@ impl App {
         self.meta_sel = 0;
         self.cover = None;
         self.editing = None;
+        self.url_modal = false;
         self.meta_rx = None;
         self.meta_tx = None;
         self.meta_gen += 1;
@@ -966,6 +972,15 @@ impl App {
             }
             return;
         }
+        if self.url_modal {
+            match key.code {
+                // `u` and esc close the URL window; `q` still quits.
+                KeyCode::Char('u') | KeyCode::Esc => self.url_modal = false,
+                KeyCode::Char('q') => self.running = false,
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
             KeyCode::Char('?') => self.help = true,
@@ -996,10 +1011,39 @@ impl App {
             KeyCode::Char('a') => self.rip_all_audio(),
             KeyCode::Char('m') => self.next_match(),
             KeyCode::Char('t') => self.start_editing(),
+            KeyCode::Char('u') => self.open_url_modal(),
             KeyCode::Char('e') => self.eject(),
             KeyCode::Char('s') => self.stop_rip(),
             _ => {}
         }
+    }
+
+    /// Opens the window showing the URL for registering the loaded disc's
+    /// layout as a MusicBrainz disc id.
+    pub fn open_url_modal(&mut self) {
+        if self.toc.is_none() {
+            self.status = Some("no disc loaded".into());
+            return;
+        }
+        if self.disc_register_url().is_none() {
+            self.status = Some("no audio tracks to register".into());
+            return;
+        }
+        self.url_modal = true;
+        self.status = None;
+    }
+
+    /// The URL for registering the loaded disc's layout as a MusicBrainz
+    /// disc id, if the disc has audio tracks.
+    pub fn disc_register_url(&self) -> Option<String> {
+        let toc = self.toc.as_ref()?;
+        let offsets: Vec<u32> = toc.audio_tracks().map(|t| t.start_lba).collect();
+        (!offsets.is_empty()).then(|| {
+            register_disc_id_url(&DiscToc {
+                offsets,
+                leadout: toc.leadout_lba,
+            })
+        })
     }
 
     /// Opens the metadata editor on the selected candidate. When the lookup
@@ -1166,9 +1210,10 @@ impl App {
     }
 
     /// Handles a mouse event (click, double-click, move, scroll). While the
-    /// metadata editor or the help window is open, mouse input is ignored.
+    /// metadata editor, help window, or URL window is open, mouse input is
+    /// ignored.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.editing.is_some() || self.help {
+        if self.editing.is_some() || self.help || self.url_modal {
             return;
         }
         match mouse.kind {
@@ -1466,6 +1511,7 @@ impl App {
                 self.meta_sel = 0;
                 self.cover = None;
                 self.editing = None;
+                self.url_modal = false;
                 self.meta_rx = None;
                 self.meta_tx = None;
                 self.meta_gen += 1;

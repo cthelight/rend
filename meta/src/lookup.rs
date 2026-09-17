@@ -203,6 +203,11 @@ fn candidates(toc: &DiscToc, throttle: &Throttle) -> Result<Vec<Candidate>, Erro
     Ok(rank_candidates(&releases.releases, toc).unwrap_or_default())
 }
 
+/// The MusicBrainz web page for registering the disc's layout as a disc id.
+pub fn register_disc_id_url(toc: &DiscToc) -> String {
+    format!("{MUSICBRAINZ}/cdtoc/attach?toc={}", toc_param(toc))
+}
+
 /// Looks up the disc with the given MusicBrainz disc id.
 ///
 /// Returns `Ok(None)` when the id is not registered.
@@ -803,6 +808,18 @@ mod tests {
             leadout: 3300,
         };
         assert_eq!(toc_param(&toc), "1+2+3300+150+1650");
+    }
+
+    #[test]
+    fn register_url_uses_the_cdtoc_attach_endpoint() {
+        let toc = DiscToc {
+            offsets: vec![150, 1650, 2450],
+            leadout: 3300,
+        };
+        assert_eq!(
+            register_disc_id_url(&toc),
+            "https://musicbrainz.org/cdtoc/attach?toc=1+3+3300+150+1650+2450"
+        );
     }
 
     #[test]

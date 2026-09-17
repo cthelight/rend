@@ -20,7 +20,7 @@ pub use cache::MetaCache;
 pub use discid::{disc_id, mb_discid};
 pub use lookup::{
     Candidate, DiscMeta, DiscToc, TrackMeta, cover_art, lookup_candidates, lookup_disc,
-    lookup_disc_all,
+    lookup_disc_all, register_disc_id_url,
 };
 pub use naming::{DEFAULT_TEMPLATE, ParseError, Template, sanitize};
 pub use tag::{TrackTags, apply};

@@ -134,6 +134,7 @@ Keyboard:
 | `r`              | rip the selected track          |
 | `a`              | rip all audio tracks            |
 | `t`              | edit the disc's tags            |
+| `u`              | show the register disc id URL   |
 | `e`              | eject the disc                  |
 | `f`              | toggle force (overwrite)        |
 | `o`              | toggle output format (flac/wav) |

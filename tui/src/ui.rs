@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table, Wrap};
 
 use crate::app::{App, Drive, EditField, Focus, Hover, MetaEdit, Regions, TrackState};
 
@@ -35,6 +35,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.regions = regions;
     if app.help {
         draw_help(f);
+    }
+    if app.url_modal {
+        if let Some(url) = app.disc_register_url() {
+            draw_register_url(f, &url);
+        }
     }
     let summary = app.match_status();
     if let Some(edit) = app.editing.as_mut() {
@@ -426,7 +431,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_help(f: &mut Frame) {
     let area = f.area();
     let width = 54u16.min(area.width.saturating_sub(2));
-    let height = 17u16.min(area.height.saturating_sub(2));
+    let height = 18u16.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -446,6 +451,7 @@ fn draw_help(f: &mut Frame) {
         ("a", "rip all audio tracks"),
         ("m", "switch metadata match"),
         ("t", "edit the disc's tags"),
+        ("u", "show the register disc id URL"),
         ("e", "eject the disc"),
         ("o", "cycle the output format"),
         ("f", "toggle force (overwrite)"),
@@ -504,6 +510,37 @@ fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: b
         ]
     };
     f.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+/// The centered modal showing the URL for registering the disc's layout as
+/// a MusicBrainz disc id.
+fn draw_register_url(f: &mut Frame, url: &str) {
+    let area = f.area();
+    let width = 90u16.min(area.width.saturating_sub(2));
+    let height = 10u16.min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let block = Block::bordered()
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Register disc id · press u or esc to close ");
+    f.render_widget(Paragraph::new("").block(block), rect);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
+        .split(rect.inner(Margin::new(1, 1)));
+    f.render_widget(
+        Paragraph::new("Open this URL in a browser to register the disc's layout on MusicBrainz.")
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(url.to_string())
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::Cyan)),
+        rows[1],
+    );
 }
 
 /// The centered modal for editing the disc's tags.
@@ -763,6 +800,33 @@ mod tests {
             album_row.contains("The Demo Band — Demo Album (2024)"),
             "unexpected album line: {album_row:?}"
         );
+    }
+
+    #[test]
+    fn u_shows_the_register_disc_id_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+
+        let plain = rendered(&mut app);
+        assert!(!plain.contains("Register disc id"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        let with_url = rendered(&mut app);
+        assert!(with_url.contains("Register disc id"));
+        assert!(
+            with_url.contains(
+                "https://musicbrainz.org/cdtoc/attach?toc=1+5+10500+0+1500+3750+3900+7500"
+            )
+        );
+
+        // While the URL window is open, other keys do nothing.
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.editing.is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let closed = rendered(&mut app);
+        assert!(!closed.contains("Register disc id"));
+        assert!(app.running);
     }
 
     #[test]
