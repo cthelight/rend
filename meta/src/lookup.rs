@@ -74,6 +74,13 @@ pub struct DiscMeta {
     /// MusicBrainz release id, for fetching cover art. Empty for metadata
     /// that was entered by hand instead of looked up.
     pub release_id: String,
+    /// MusicBrainz id of the release artist, when looked up.
+    pub release_artist_id: Option<String>,
+    /// 1-based position of this disc within the release, when the release
+    /// has more than one disc.
+    pub disc_number: Option<u32>,
+    /// Total discs in the release, when the release has more than one disc.
+    pub disc_count: Option<u32>,
     /// Per-track metadata, in disc order (audio tracks only).
     pub tracks: Vec<TrackMeta>,
 }
@@ -85,12 +92,28 @@ pub struct TrackMeta {
     pub title: String,
     /// The track's artist, if it differs from the release artist.
     pub artist: Option<String>,
+    /// MusicBrainz id of the track's artist, when known.
+    pub artist_id: Option<String>,
+    /// MusicBrainz recording id, when known.
+    pub recording_id: Option<String>,
+    /// MusicBrainz release-track id, when known.
+    pub release_track_id: Option<String>,
 }
 
 impl DiscMeta {
     /// The metadata of the track at the given 1-based position, if known.
     pub fn track(&self, position: usize) -> Option<&TrackMeta> {
         position.checked_sub(1).and_then(|i| self.tracks.get(i))
+    }
+
+    /// This disc's position within the release, as "n/total" (or the bare
+    /// "n" when the total is unknown). `None` for a single-disc release.
+    pub fn disc_position(&self) -> Option<String> {
+        let number = self.disc_number?;
+        match self.disc_count {
+            Some(total) => Some(format!("{number}/{total}")),
+            None => Some(number.to_string()),
+        }
     }
 }
 
@@ -335,6 +358,7 @@ fn matched_medium<'a>(release: &'a MbRelease, id: &str) -> Option<(&'a MbRelease
 
 fn to_disc_meta(release: &MbRelease, medium: Option<&MbMedium>) -> DiscMeta {
     let release_artist = credit_names(&release.artist_credit);
+    let release_artist_id = credit_artist_id(&release.artist_credit);
     let tracks = medium
         .map(|m| {
             m.tracks
@@ -344,18 +368,39 @@ fn to_disc_meta(release: &MbRelease, medium: Option<&MbMedium>) -> DiscMeta {
                         .map(str::to_string)
                         .unwrap_or_else(|| "Unknown".into()),
                     artist: track_artist(track, &release_artist),
+                    artist_id: credit_artist_id(&track.artist_credit),
+                    recording_id: track.recording.as_ref().and_then(|r| r.id.clone()),
+                    release_track_id: track.id.clone(),
                 })
                 .collect()
         })
         .unwrap_or_default();
+    // Disc numbers only mean something on a multi-disc release, so a
+    // single-disc one carries none at all.
+    let multi = release.medium_count > 1;
+    let disc_number = if multi {
+        medium.and_then(|m| (m.position > 0).then_some(m.position))
+    } else {
+        None
+    };
     DiscMeta {
         album: release.title.clone(),
         artist: release_artist,
         album_artist: None,
         year: release.date.as_deref().and_then(year_of),
         release_id: release.id.clone(),
+        release_artist_id,
+        disc_number,
+        disc_count: multi.then_some(release.medium_count),
         tracks,
     }
+}
+
+/// The MusicBrainz id of the first artist in a credit, when one carries it.
+fn credit_artist_id(credit: &[MbCredit]) -> Option<String> {
+    credit
+        .iter()
+        .find_map(|c| c.artist.as_ref().and_then(|a| a.id.clone()))
 }
 
 fn track_artist(track: &MbTrack, release_artist: &str) -> Option<String> {
@@ -488,6 +533,8 @@ struct MbRelease {
     date: Option<String>,
     #[serde(default)]
     media: Vec<MbMedium>,
+    #[serde(default, rename = "medium-count")]
+    medium_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -495,10 +542,21 @@ struct MbCredit {
     name: String,
     #[serde(default)]
     joinphrase: String,
+    #[serde(default)]
+    artist: Option<MbArtist>,
+}
+
+#[derive(Deserialize)]
+struct MbArtist {
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct MbMedium {
+    /// 1-based position within the release; 0 when MusicBrainz omits it.
+    #[serde(default)]
+    position: u32,
     #[serde(default)]
     tracks: Vec<MbTrack>,
     #[serde(default)]
@@ -513,6 +571,8 @@ struct MbDisc {
 #[derive(Deserialize)]
 struct MbTrack {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     title: String,
     length: Option<u64>,
     #[serde(default, rename = "artist-credit")]
@@ -522,6 +582,8 @@ struct MbTrack {
 
 #[derive(Deserialize)]
 struct MbRecording {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     title: String,
     length: Option<u64>,
@@ -546,7 +608,7 @@ mod tests {
           "id": "rel-1",
           "title": "The Album",
           "artist-credit": [
-            { "name": "The Band", "joinphrase": " feat. " },
+            { "name": "The Band", "joinphrase": " feat. ", "artist": { "id": "ar-1" } },
             { "name": "The Choir", "joinphrase": "" }
           ],
           "date": "1997-05-20",
@@ -558,18 +620,59 @@ mod tests {
               "tracks": [
                 {
                   "position": 1,
+                  "id": "rt-1",
                   "title": "First Song",
                   "length": 20100,
-                  "artist-credit": [ { "name": "Guest Star" } ],
+                  "artist-credit": [ { "name": "Guest Star", "artist": { "id": "ar-2" } } ],
                   "recording": { "id": "rec-1", "title": "First Song" }
                 },
                 {
                   "position": 2,
+                  "id": "rt-2",
                   "title": "",
                   "length": 10600,
                   "recording": { "id": "rec-2", "title": "Second Song" }
                 },
                 { "position": 3, "length": 11400 }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    "#;
+
+    /// The exact-lookup response for the first disc of a two-disc release.
+    const MULTI_DISC: &str = r#"
+    {
+      "id": "disc-1",
+      "offset-count": 3,
+      "sectors": 3300,
+      "offsets": [150, 1650, 2450],
+      "releases": [
+        {
+          "id": "rel-1",
+          "title": "The Album",
+          "artist-credit": [ { "name": "The Band" } ],
+          "date": "1997-05-20",
+          "medium-count": 2,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "discs": [ { "id": "disc-1" } ],
+              "tracks": [
+                { "position": 1, "title": "First Song", "length": 20100 },
+                { "position": 2, "title": "Second Song", "length": 10600 },
+                { "position": 3, "title": "Third Song", "length": 11400 }
+              ]
+            },
+            {
+              "position": 2,
+              "format": "CD",
+              "discs": [ ],
+              "tracks": [
+                { "position": 1, "title": "Bonus", "length": 30000 }
               ]
             }
           ]
@@ -636,6 +739,9 @@ mod tests {
         assert_eq!(meta.artist, "The Band feat. The Choir");
         assert_eq!(meta.year.as_deref(), Some("1997"));
         assert_eq!(meta.release_id, "rel-1");
+        // A single-disc release carries no disc position.
+        assert_eq!(meta.disc_number, None);
+        assert_eq!(meta.disc_count, None);
         assert_eq!(meta.tracks.len(), 3);
         assert_eq!(meta.tracks[0].title, "First Song");
         assert_eq!(meta.tracks[0].artist.as_deref(), Some("Guest Star"));
@@ -645,6 +751,68 @@ mod tests {
         // A bare track falls back to "Unknown".
         assert_eq!(meta.tracks[2].title, "Unknown");
         assert_eq!(meta.tracks[2].artist, None);
+    }
+
+    #[test]
+    fn cdtoc_parses_the_musicbrainz_ids() {
+        let cdtoc: MbCdtoc = serde_json::from_str(EXACT).unwrap();
+        let (release, medium) = matched_medium(&cdtoc.releases[0], "disc-1").unwrap();
+        let meta = to_disc_meta(release, Some(medium));
+
+        // The release artist id comes from the first credit that carries one.
+        assert_eq!(meta.release_artist_id.as_deref(), Some("ar-1"));
+        assert_eq!(meta.release_id, "rel-1");
+        // A credited track carries its own artist and the recording ids.
+        assert_eq!(meta.tracks[0].artist_id.as_deref(), Some("ar-2"));
+        assert_eq!(meta.tracks[0].recording_id.as_deref(), Some("rec-1"));
+        assert_eq!(meta.tracks[0].release_track_id.as_deref(), Some("rt-1"));
+        // An uncredited track keeps the recording id but no artist id.
+        assert_eq!(meta.tracks[1].artist_id, None);
+        assert_eq!(meta.tracks[1].recording_id.as_deref(), Some("rec-2"));
+        assert_eq!(meta.tracks[1].release_track_id.as_deref(), Some("rt-2"));
+        // A bare track has no ids at all.
+        assert_eq!(meta.tracks[2].artist_id, None);
+        assert_eq!(meta.tracks[2].recording_id, None);
+        assert_eq!(meta.tracks[2].release_track_id, None);
+    }
+
+    #[test]
+    fn cdtoc_parses_disc_position_for_multi_disc() {
+        let cdtoc: MbCdtoc = serde_json::from_str(MULTI_DISC).unwrap();
+        let (release, medium) = matched_medium(&cdtoc.releases[0], "disc-1").unwrap();
+        let meta = to_disc_meta(release, Some(medium));
+        assert_eq!(meta.disc_number, Some(1));
+        assert_eq!(meta.disc_count, Some(2));
+        assert_eq!(meta.disc_position().as_deref(), Some("1/2"));
+    }
+
+    #[test]
+    fn disc_position_labels_multi_disc_releases() {
+        let meta = DiscMeta {
+            album: "The Album".into(),
+            artist: "The Band".into(),
+            album_artist: None,
+            year: None,
+            release_id: "rel-1".into(),
+            release_artist_id: None,
+            disc_number: Some(2),
+            disc_count: Some(3),
+            tracks: vec![],
+        };
+        assert_eq!(meta.disc_position().as_deref(), Some("2/3"));
+        // A single-disc release has no disc position at all.
+        let single = DiscMeta {
+            disc_number: None,
+            disc_count: None,
+            ..meta.clone()
+        };
+        assert_eq!(single.disc_position(), None);
+        // A number without a total degrades to the bare number.
+        let partial = DiscMeta {
+            disc_count: None,
+            ..meta
+        };
+        assert_eq!(partial.disc_position().as_deref(), Some("2"));
     }
 
     #[test]
@@ -750,6 +918,24 @@ mod tests {
     }
 
     #[test]
+    fn rank_carries_disc_position_for_multi_disc() {
+        let releases: MbReleaseList = serde_json::from_str(
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "medium-count": 2, "media": [
+                {"position": 2, "tracks": [
+                    { "title": "A", "length": 20100 },
+                    { "title": "B", "length": 10600 },
+                    { "title": "C", "length": 11400 }
+                ]}
+            ]}]}"#,
+        )
+        .unwrap();
+        let ranked = rank_candidates(&releases.releases, &test_toc()).unwrap();
+        assert_eq!(ranked[0].meta.disc_number, Some(2));
+        assert_eq!(ranked[0].meta.disc_count, Some(2));
+        assert_eq!(ranked[0].meta.disc_position().as_deref(), Some("2/2"));
+    }
+
+    #[test]
     fn acceptance_needs_every_track_within_tolerance() {
         let meta = DiscMeta {
             album: "The Album".into(),
@@ -757,6 +943,9 @@ mod tests {
             album_artist: None,
             year: None,
             release_id: "rel-1".into(),
+            release_artist_id: None,
+            disc_number: None,
+            disc_count: None,
             tracks: vec![],
         };
         // An exact hit and a boundary hit are accepted.

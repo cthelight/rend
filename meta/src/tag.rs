@@ -30,8 +30,25 @@ pub struct TrackTags {
     pub track_number: u32,
     /// Total audio tracks on the disc, if known.
     pub track_count: Option<u32>,
+    /// 1-based disc position within the release, for multi-disc releases.
+    pub disc_number: Option<u32>,
+    /// Total discs in the release, for multi-disc releases.
+    pub disc_count: Option<u32>,
     /// Release year, if known.
     pub year: Option<String>,
+    /// The disc's catalog number (MCN), when the drive reported one.
+    pub catalog_number: Option<String>,
+    /// MusicBrainz release id, when looked up.
+    pub release_id: Option<String>,
+    /// MusicBrainz id of the release artist, when looked up.
+    pub release_artist_id: Option<String>,
+    /// MusicBrainz id of the track's artist (falling back to the release
+    /// artist), when known.
+    pub artist_id: Option<String>,
+    /// MusicBrainz recording id, when known.
+    pub recording_id: Option<String>,
+    /// MusicBrainz release-track id, when known.
+    pub release_track_id: Option<String>,
 }
 
 impl TrackTags {
@@ -56,7 +73,15 @@ impl TrackTags {
                 .or(release_artist),
             track_number: position as u32,
             track_count: (total > 1).then_some(total as u32),
+            disc_number: disc.disc_number,
+            disc_count: disc.disc_count,
             year: disc.year.clone(),
+            catalog_number: None,
+            release_id: (!disc.release_id.is_empty()).then(|| disc.release_id.clone()),
+            release_artist_id: disc.release_artist_id.clone(),
+            artist_id: track.artist_id.clone().or(disc.release_artist_id.clone()),
+            recording_id: track.recording_id.clone(),
+            release_track_id: track.release_track_id.clone(),
         })
     }
 }
@@ -77,6 +102,12 @@ pub enum Error {
 
 /// Writes `tags` (and the cover `art`, if any) into the audio file at
 /// `path`, in place.
+///
+/// FLAC files get every field, including all six MusicBrainz ids, via Vorbis
+/// comments. Other formats are written as ID3v2, where lofty can only carry the
+/// catalog number, release-artist id and artist id; the release and
+/// release-track ids have no standard four-letter frame and the recording id's
+/// UFID frame is dropped, so those three are not written for ID3v2.
 pub fn apply(path: &Path, tags: &TrackTags, art: Option<&[u8]>) -> Result<(), Error> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let mut audio = lofty::read_from(&mut file)?;
@@ -99,8 +130,32 @@ pub fn apply(path: &Path, tags: &TrackTags, art: Option<&[u8]>) -> Result<(), Er
     if let Some(total) = tags.track_count {
         tag.set_track_total(total);
     }
+    if let Some(number) = tags.disc_number {
+        tag.set_disk(number);
+    }
+    if let Some(total) = tags.disc_count {
+        tag.set_disk_total(total);
+    }
     if let Some(year) = &tags.year {
         tag.insert_text(ItemKey::Year, year.clone());
+    }
+    if let Some(catalog) = &tags.catalog_number {
+        tag.insert_text(ItemKey::CatalogNumber, catalog.clone());
+    }
+    if let Some(id) = &tags.release_id {
+        tag.insert_text(ItemKey::MusicBrainzReleaseId, id.clone());
+    }
+    if let Some(id) = &tags.release_artist_id {
+        tag.insert_text(ItemKey::MusicBrainzReleaseArtistId, id.clone());
+    }
+    if let Some(id) = &tags.artist_id {
+        tag.insert_text(ItemKey::MusicBrainzArtistId, id.clone());
+    }
+    if let Some(id) = &tags.recording_id {
+        tag.insert_text(ItemKey::MusicBrainzRecordingId, id.clone());
+    }
+    if let Some(id) = &tags.release_track_id {
+        tag.insert_text(ItemKey::MusicBrainzTrackId, id.clone());
     }
 
     if let Some(art) = art {
@@ -165,14 +220,23 @@ mod tests {
             album_artist: None,
             year: Some("1997".into()),
             release_id: "rel-1".into(),
+            release_artist_id: Some("ar-1".into()),
+            disc_number: Some(1),
+            disc_count: Some(2),
             tracks: vec![
                 crate::lookup::TrackMeta {
                     title: "First Song".into(),
                     artist: None,
+                    artist_id: None,
+                    recording_id: Some("rec-1".into()),
+                    release_track_id: Some("rt-1".into()),
                 },
                 crate::lookup::TrackMeta {
                     title: "Second Song".into(),
                     artist: Some("Guest".into()),
+                    artist_id: Some("ar-2".into()),
+                    recording_id: Some("rec-2".into()),
+                    release_track_id: Some("rt-2".into()),
                 },
             ],
         }
@@ -188,15 +252,57 @@ mod tests {
         assert_eq!(tags.album_artist.as_deref(), Some("The Band"));
         assert_eq!(tags.track_number, 1);
         assert_eq!(tags.track_count, Some(2));
+        assert_eq!(tags.disc_number, Some(1));
+        assert_eq!(tags.disc_count, Some(2));
         assert_eq!(tags.year.as_deref(), Some("1997"));
+        // The catalog number is not known until the rip, so it starts out
+        // empty and is filled in per disc.
+        assert_eq!(tags.catalog_number, None);
+        assert_eq!(tags.release_id.as_deref(), Some("rel-1"));
+        assert_eq!(tags.release_artist_id.as_deref(), Some("ar-1"));
+        // An uncredited track's artist id falls back to the release artist's.
+        assert_eq!(tags.artist_id.as_deref(), Some("ar-1"));
+        assert_eq!(tags.recording_id.as_deref(), Some("rec-1"));
+        assert_eq!(tags.release_track_id.as_deref(), Some("rt-1"));
 
         // A per-track artist wins over the release artist.
         let tags = TrackTags::for_track(&disc, 2, 2).unwrap();
         assert_eq!(tags.artist, "Guest");
+        assert_eq!(tags.artist_id.as_deref(), Some("ar-2"));
+        assert_eq!(tags.recording_id.as_deref(), Some("rec-2"));
+        assert_eq!(tags.release_track_id.as_deref(), Some("rt-2"));
 
         // Unknown positions yield no tags at all.
         assert_eq!(TrackTags::for_track(&disc, 3, 2), None);
         assert_eq!(TrackTags::for_track(&disc, 0, 2), None);
+    }
+
+    #[test]
+    fn single_disc_tracks_get_no_disc_tags() {
+        let mut disc = disc_meta();
+        disc.disc_number = None;
+        disc.disc_count = None;
+        let tags = TrackTags::for_track(&disc, 1, 2).unwrap();
+        assert_eq!(tags.disc_number, None);
+        assert_eq!(tags.disc_count, None);
+        // The track numbering is unaffected.
+        assert_eq!(tags.track_number, 1);
+        assert_eq!(tags.track_count, Some(2));
+    }
+
+    #[test]
+    fn an_empty_release_id_yields_no_release_tags() {
+        let mut disc = disc_meta();
+        disc.release_id = String::new();
+        disc.release_artist_id = None;
+        let tags = TrackTags::for_track(&disc, 1, 2).unwrap();
+        assert_eq!(tags.release_id, None);
+        assert_eq!(tags.release_artist_id, None);
+        // With no release artist id, an uncredited track has no artist id.
+        assert_eq!(tags.artist_id, None);
+        // The other ids are unaffected.
+        assert_eq!(tags.recording_id.as_deref(), Some("rec-1"));
+        assert_eq!(tags.release_track_id.as_deref(), Some("rt-1"));
     }
 
     #[test]
@@ -250,9 +356,80 @@ mod tests {
         );
         assert_eq!(tag.track(), Some(1));
         assert_eq!(tag.track_total(), Some(2));
+        assert_eq!(tag.disk(), Some(1));
+        assert_eq!(tag.disk_total(), Some(2));
         let pic = tag.get_picture_type(PictureType::CoverFront).unwrap();
         assert_eq!(pic.data(), JPEG_1X1);
         assert!(matches!(pic.mime_type().unwrap(), MimeType::Jpeg));
+    }
+
+    /// A track with a catalog number set at rip time gets it and the
+    /// MusicBrainz ids written. ID3v2 has no standard four-letter frame for the
+    /// release and release-track ids, and lofty's WAV writer drops the
+    /// recording id's UFID frame, so only the catalog number and the
+    /// release-artist and artist ids survive on ID3v2 (the full set is covered
+    /// by the FLAC test).
+    #[test]
+    fn the_catalog_number_and_musicbrainz_ids_are_written_to_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.wav");
+        {
+            let mut w = rend_encode::wav::WavWriter::create(&path).unwrap();
+            w.write(&vec![0u8; 44_100 * 4]).unwrap();
+            w.finish().unwrap();
+        }
+
+        let mut tags = TrackTags::for_track(&disc_meta(), 1, 2).unwrap();
+        tags.catalog_number = Some("MCN 123".into());
+        apply(&path, &tags, None).unwrap();
+
+        let file = lofty::read_from_path(&path).unwrap();
+        let tag = file.tag(TagType::Id3v2).expect("an ID3v2 tag was written");
+        assert_eq!(tag.get_string(ItemKey::CatalogNumber), Some("MCN 123"));
+        assert_eq!(
+            tag.get_string(ItemKey::MusicBrainzReleaseArtistId),
+            Some("ar-1")
+        );
+        assert_eq!(tag.get_string(ItemKey::MusicBrainzArtistId), Some("ar-1"));
+    }
+
+    /// The full set of ids (including the release and release-track ids, which
+    /// have no ID3v2 frame) round-trips through Vorbis comments when the track
+    /// is a FLAC file (skipped on hosts without ffmpeg to encode one).
+    #[test]
+    fn the_catalog_number_and_musicbrainz_ids_are_written_to_flac() {
+        if !rend_encode::ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.flac");
+        {
+            let mut w = rend_encode::flac::FlacWriter::create(&path).unwrap();
+            w.write(&vec![0u8; 44_100 * 4]).unwrap();
+            w.finish().unwrap();
+        }
+
+        let mut tags = TrackTags::for_track(&disc_meta(), 1, 2).unwrap();
+        tags.catalog_number = Some("MCN 123".into());
+        apply(&path, &tags, None).unwrap();
+
+        let file = lofty::read_from_path(&path).unwrap();
+        let tag = file
+            .tag(TagType::VorbisComments)
+            .expect("vorbis comments were written");
+        assert_eq!(tag.get_string(ItemKey::CatalogNumber), Some("MCN 123"));
+        assert_eq!(tag.get_string(ItemKey::MusicBrainzReleaseId), Some("rel-1"));
+        assert_eq!(
+            tag.get_string(ItemKey::MusicBrainzReleaseArtistId),
+            Some("ar-1")
+        );
+        assert_eq!(tag.get_string(ItemKey::MusicBrainzArtistId), Some("ar-1"));
+        assert_eq!(
+            tag.get_string(ItemKey::MusicBrainzRecordingId),
+            Some("rec-1")
+        );
+        assert_eq!(tag.get_string(ItemKey::MusicBrainzTrackId), Some("rt-1"));
     }
 
     /// Same roundtrip through a real FLAC file, when ffmpeg is available to
@@ -288,6 +465,8 @@ mod tests {
             Some("The Album")
         );
         assert_eq!(tag.track(), Some(2));
+        assert_eq!(tag.disk(), Some(1));
+        assert_eq!(tag.disk_total(), Some(2));
         let pic = tag.get_picture_type(PictureType::CoverFront).unwrap();
         assert_eq!(pic.data(), JPEG_1X1);
     }

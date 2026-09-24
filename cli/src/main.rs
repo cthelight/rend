@@ -415,6 +415,9 @@ fn rip_device(
     let prefix = opts.prefix.as_str();
     dev.require_disc()?;
     let toc = dev.toc()?;
+    // The medium catalog number, if the drive reports one: best effort, an
+    // unreadable MCN is no reason to fail the rip.
+    let mcn = dev.mcn().ok().flatten();
 
     for &n in only {
         match toc.track(n) {
@@ -444,7 +447,6 @@ fn rip_device(
         });
     }
 
-    let total_audio = toc.audio_tracks().count();
     let metadata = if opts.no_metadata {
         None
     } else if let Some(n) = opts.r#match {
@@ -500,7 +502,7 @@ fn rip_device(
                     path.display()
                 );
                 if let Some((disc, art)) = &metadata {
-                    tag_track(&toc, &path, disc, art, track.number, total_audio, prefix);
+                    tag_track(&toc, &path, disc, art, mcn.as_deref(), track.number, prefix);
                 }
             }
             Err(e) => {
@@ -700,16 +702,18 @@ fn tag_track(
     path: &Path,
     disc: &DiscMeta,
     art: &Option<Vec<u8>>,
+    catalog_number: Option<&str>,
     number: u8,
-    total: usize,
     prefix: &str,
 ) {
     let Some(position) = track_position(toc, number) else {
         return;
     };
-    let Some(tags) = TrackTags::for_track(disc, position, total) else {
+    let total = toc.audio_tracks().count();
+    let Some(mut tags) = TrackTags::for_track(disc, position, total) else {
         return;
     };
+    tags.catalog_number = catalog_number.map(str::to_string);
     if let Err(e) = apply(path, &tags, art.as_deref()) {
         eprintln!("{prefix}track {number:02}: warning: could not write tags: {e}");
     }
@@ -755,6 +759,9 @@ mod tests {
                 album_artist: None,
                 year: None,
                 release_id: release_id.into(),
+                release_artist_id: None,
+                disc_number: None,
+                disc_count: None,
                 tracks: vec![],
             },
             max_diff_ms: 0,

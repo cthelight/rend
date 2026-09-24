@@ -83,6 +83,8 @@ pub struct RipJob {
     pub meta: Option<DiscMeta>,
     /// The disc's cover art, if any, to embed in the track files.
     pub cover: Option<Vec<u8>>,
+    /// The disc's catalog number (MCN), if the drive reported one.
+    pub catalog_number: Option<String>,
 }
 
 /// Spawns the rip worker.
@@ -227,9 +229,10 @@ fn tag_track(job: &RipJob, spec: &TrackSpec) {
     else {
         return;
     };
-    let Some(tags) = TrackTags::for_track(disc, position, total) else {
+    let Some(mut tags) = TrackTags::for_track(disc, position, total) else {
         return;
     };
+    tags.catalog_number = job.catalog_number.clone();
     let _ = apply(&spec.path, &tags, job.cover.as_deref());
 }
 
@@ -294,6 +297,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             meta: None,
             cover: None,
+            catalog_number: None,
         };
         let handle = spawn(job, tx);
         let mut events = Vec::new();
@@ -403,6 +407,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             meta: Some(crate::demo::demo_meta()),
             cover: Some(crate::demo::demo_cover()),
+            catalog_number: Some(crate::demo::DEMO_MCN.into()),
         };
         let handle = spawn(job, tx);
         for _ in rx {}
@@ -422,6 +427,10 @@ mod tests {
         assert_eq!(
             tag.artist().map(std::borrow::Cow::into_owned).as_deref(),
             Some("Guest Artist")
+        );
+        assert_eq!(
+            tag.get_string(lofty::tag::ItemKey::CatalogNumber),
+            Some(crate::demo::DEMO_MCN)
         );
         let pic = tag
             .get_picture_type(lofty::picture::PictureType::CoverFront)

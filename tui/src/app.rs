@@ -849,7 +849,11 @@ impl App {
         } else {
             disc.artist.as_str()
         };
-        Some(format!("{artist} — {album}{year}"))
+        let disc_position = disc
+            .disc_position()
+            .map(|p| format!(" · disc {p}"))
+            .unwrap_or_default();
+        Some(format!("{artist} — {album}{year}{disc_position}"))
     }
 
     /// Remembers the loaded disc's album on the selected drive, so its panel
@@ -888,7 +892,11 @@ impl App {
         } else {
             disc.artist.as_str()
         };
-        Some(format!("{prefix}{artist} — {album}{year}"))
+        let disc_position = disc
+            .disc_position()
+            .map(|p| format!(" · disc {p}"))
+            .unwrap_or_default();
+        Some(format!("{prefix}{artist} — {album}{year}{disc_position}"))
     }
 
     /// Switches to the next candidate match, wrapping around.
@@ -1104,6 +1112,9 @@ impl App {
             .map(|t| TrackMeta {
                 title: format!("Track {}", t.number),
                 artist: None,
+                artist_id: None,
+                recording_id: None,
+                release_track_id: None,
             })
             .collect();
         self.meta_gen += 1;
@@ -1116,6 +1127,9 @@ impl App {
             album_artist: None,
             year: None,
             release_id: String::new(),
+            release_artist_id: None,
+            disc_number: None,
+            disc_count: None,
             tracks,
         }]);
         self.meta_sel = 0;
@@ -1571,6 +1585,7 @@ impl App {
             stop: stop.clone(),
             meta: self.selected_meta().cloned(),
             cover: self.cover.clone(),
+            catalog_number: self.disc_id.clone(),
         };
         let thread = rip::spawn(job, tx);
         let mut state = RipState::fresh(self.track_count());
@@ -1740,6 +1755,19 @@ mod tests {
         // The simulated disc carries a second candidate for the switch flow.
         assert_eq!(app.meta.as_ref().unwrap().len(), 2);
         assert!(app.cover.is_some());
+    }
+
+    #[test]
+    fn match_status_shows_the_disc_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = demo_app(dir.path());
+
+        // The simulated disc is the first of two, so the status line says so.
+        assert!(
+            app.match_status()
+                .unwrap()
+                .contains("The Demo Band — Demo Album (2024) · disc 1/2")
+        );
     }
 
     #[test]
@@ -2491,6 +2519,9 @@ mod tests {
             album_artist: None,
             year: None,
             release_id: release_id.into(),
+            release_artist_id: None,
+            disc_number: None,
+            disc_count: None,
             tracks: vec![],
         }
     }

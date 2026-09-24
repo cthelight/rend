@@ -241,9 +241,15 @@ mod tests {
             album_artist: None,
             year: Some("2024".into()),
             release_id: "rel".into(),
+            release_artist_id: None,
+            disc_number: None,
+            disc_count: None,
             tracks: vec![TrackMeta {
                 title: "First Song".into(),
                 artist: None,
+                artist_id: None,
+                recording_id: None,
+                release_track_id: None,
             }],
         }
     }
