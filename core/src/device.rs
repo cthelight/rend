@@ -170,8 +170,64 @@ impl Device {
     }
 
     /// Ejects the disc (opens the tray).
+    ///
+    /// The kernel refuses `CDROMEJECT` with `EBUSY` when the door is
+    /// locked or the device is held open elsewhere (e.g. the disc is
+    /// mounted), so the door is unlocked first and a raw SCSI eject is
+    /// used as a fallback — the same strategy as the standard `eject`
+    /// utility.
     pub fn eject(&self) -> Result<()> {
-        ioctl_cmd(&self.file, sys::CDROMEJECT)?;
+        // Unlock the door; a plain value, not a pointer. Best effort:
+        // drives without a lockable door ignore it.
+        // SAFETY: the fd is owned by `file` and valid; no user data is passed.
+        let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), sys::CDROM_LOCKDOOR, 0i32) };
+
+        if ioctl_cmd(&self.file, sys::CDROMEJECT).is_ok() {
+            return Ok(());
+        }
+        self.scsi_eject()
+    }
+
+    /// Ejects with a raw SCSI START/STOP UNIT command, which bypasses the
+    /// uniform CD-ROM layer's checks on open file descriptors and the
+    /// door lock.
+    fn scsi_eject(&self) -> Result<()> {
+        // Allow medium removal first, then request the eject (LOEJ bit).
+        let _ = self.scsi_start_stop(0);
+        self.scsi_start_stop(1)
+    }
+
+    /// START/STOP UNIT with the given value in byte 4 (0: stop, 1: eject).
+    fn scsi_start_stop(&self, byte4: u8) -> Result<()> {
+        let mut sense = [0u8; 32];
+        let mut cgc = Cdrom_generic_command::new([
+            sys::GPCMD_START_STOP_UNIT,
+            0,
+            0,
+            0,
+            byte4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        cgc.sense = sense.as_mut_ptr().cast::<c_char>();
+        cgc.data_direction = sys::CGC_DATA_NONE;
+
+        // SAFETY: the fd is owned by `file` and valid; `cgc` outlives the call.
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), sys::CDROM_SEND_PACKET, &mut cgc) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        if cgc.stat != 0 {
+            return Err(Error::Unexpected(format!(
+                "{}: START/STOP UNIT failed (stat={})",
+                self.path, cgc.stat
+            )));
+        }
         Ok(())
     }
 

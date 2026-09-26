@@ -120,6 +120,8 @@ pub const CGC_DATA_NONE: c_uchar = 3;
 // ---------------------------------------------------------------------------
 
 pub const GPCMD_INQUIRY: c_uchar = 0x12;
+/// START/STOP UNIT (byte 4: bit 0 start, bit 1 LOEJ/eject).
+pub const GPCMD_START_STOP_UNIT: c_uchar = 0x1E;
 
 /// Length of the SCSI command block in `cdrom_generic_command`.
 pub const CDROM_PACKET_SIZE: usize = 12;
