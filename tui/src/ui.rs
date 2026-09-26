@@ -5,21 +5,27 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, BorderType, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap};
+
+use rend_core::Toc;
 
 use crate::app::{App, Drive, EditField, Focus, Hover, MetaEdit, Regions, TrackState};
 
 /// The width of the vertical drives panel on the left.
-const DRIVES_WIDTH: u16 = 40;
+const DRIVES_WIDTH: u16 = 38;
 /// The lines a drives panel entry occupies: the name, then the album.
 const DRIVE_ENTRY_LINES: u16 = 2;
+/// The TOC table's fixed-width columns: `#`, start, length, and state.
+const TOC_FIXED_WIDTH: u16 = 4 + 8 + 6 + 18;
+/// The width of the per-track progress bar in the state column.
+const STATE_BAR: usize = 10;
 
 /// Draws the whole screen and updates the mouse hit-test regions.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::vertical([
         Constraint::Min(4),
-        Constraint::Length(6),
+        Constraint::Length(5),
         Constraint::Length(1),
     ])
     .split(area);
@@ -48,12 +54,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn panel_block(title: String, focused: bool) -> Block<'static> {
-    let border = if focused {
-        Style::default().fg(Color::Cyan)
+    let style = if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    Block::bordered().border_style(border).title(title)
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style)
+        .title(Span::styled(title, style))
+}
+
+/// A message centered in a bordered panel's inner area.
+fn draw_centered(f: &mut Frame, block: Block<'static>, area: Rect, msg: &str) {
+    let inner = area.inner(Margin::new(1, 1));
+    let width = inner.width as usize;
+    let msg: String = msg.chars().take(width).collect();
+    let pad = width.saturating_sub(msg.chars().count()).div_ceil(2);
+    let row = inner.y + inner.height / 2;
+    f.render_widget(Paragraph::new("").block(block), area);
+    f.render_widget(
+        Paragraph::new(format!("{}{}", " ".repeat(pad), msg))
+            .style(Style::default().fg(Color::DarkGray)),
+        Rect::new(inner.x, row, inner.width, 1),
+    );
 }
 
 fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
@@ -61,18 +87,13 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
     let block = panel_block(" Drives ".into(), app.focus == Focus::Drives);
 
     if app.drives.is_empty() {
-        f.render_widget(
-            Paragraph::new("no CD-ROM devices found — try rend-tui --demo")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(block),
-            area,
-        );
+        draw_centered(f, block, area, "no CD-ROM drives found — try --demo");
         return;
     }
 
     f.render_widget(Paragraph::new("").block(block), area);
     let inner = area.inner(Margin::new(1, 1));
-    let visible = (inner.height as usize) / DRIVE_ENTRY_LINES as usize;
+    let visible = app.drives_visible(area);
     let start = clamp_scroll(app.drives_scroll, app.drive_sel, app.drives.len(), visible);
     app.drives_scroll = start;
 
@@ -89,7 +110,6 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
         let info = Rect::new(inner.x, top + 1, inner.width, 1);
         let selected = i == app.drive_sel;
         let hovered = app.hover == Hover::Drive(i);
-        let label = drive_name(d, selected, hovered, inner.width as usize);
 
         if app.drive_ripping(i) {
             // A rip in progress turns the drive's name line into the rip's
@@ -105,21 +125,20 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
                 name,
             );
         } else {
-            let style = if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else if hovered {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            f.render_widget(Paragraph::new(label).style(style), name);
+            f.render_widget(
+                Paragraph::new(drive_name_line(d, selected, hovered, inner.width as usize)),
+                name,
+            );
         }
 
         // Under the name: the disc's album once matched, else the drive's
         // status.
         let (text, color) = match &d.album {
-            Some(album) => (format!(" {album}"), Color::Gray),
-            None => (format!(" {}", d.status), status_color(&d.status)),
+            Some(album) => (
+                format!("  {}", truncate_chars(album, (inner.width - 2) as usize)),
+                Color::Gray,
+            ),
+            None => (format!("  {}", d.status), status_color(&d.status)),
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color)))),
@@ -129,17 +148,29 @@ fn draw_drives(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) 
 }
 
 /// The drive's name line: the selection marker, its path, and its label,
-/// padded to the full width so a selected (reversed) entry spans the row.
-fn drive_name(d: &Drive, selected: bool, hovered: bool, width: usize) -> String {
+/// which stays dim. A selected entry is reversed across the full row; a
+/// hovered one is bold.
+fn drive_name_line(d: &Drive, selected: bool, hovered: bool, width: usize) -> Line<'static> {
     let marker = if selected { "●" } else { "○" };
-    let name = format!("{marker} {} {}", d.path, d.label);
-    let name: String = name.chars().take(width).collect();
-    let pad = width.saturating_sub(name.chars().count());
-    if pad > 0 && (selected || hovered) {
-        format!("{name}{}", " ".repeat(pad))
-    } else {
-        name
+    let name = format!("{marker} {}", d.path);
+    let mut label = format!("  {}", d.label);
+    if label.chars().count() > width.saturating_sub(name.chars().count()) {
+        let keep = width.saturating_sub(name.chars().count()).saturating_sub(1);
+        let cut: String = label.chars().take(keep).collect();
+        label = format!("{cut}…");
     }
+    let base = if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else if hovered {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::raw(name),
+        Span::styled(label, Style::default().fg(Color::DarkGray)),
+    ])
+    .style(base)
 }
 
 /// The drive's name line while its rip is running: the name, centered, with
@@ -181,23 +212,24 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .get(app.drive_sel)
         .map(|d| d.path.as_str())
         .unwrap_or("?");
-    let meta = app.match_status().map(|s| format!(" · {s}"));
+    // The album, once matched, headlines the panel; until then the drive's
+    // path does.
     let title = match app.toc.as_ref() {
-        Some(_) => {
-            let id = app
-                .disc_id
-                .as_deref()
-                .map(|s| format!(" · disc id {s}"))
-                .unwrap_or_default();
-            format!(" TOC — {path}{id}{} ", meta.unwrap_or_default())
-        }
+        Some(_) => app
+            .album_summary()
+            .map(|album| format!(" {album} "))
+            .unwrap_or_else(|| format!(" TOC — {path} ")),
         None => {
             let state = if app.loading_toc {
-                "loading…"
+                "reading…"
             } else {
                 "no disc"
             };
-            format!(" TOC — {path} ({state}) ")
+            if app.drives.is_empty() {
+                format!(" TOC — {state} ")
+            } else {
+                format!(" TOC — {path} ({state}) ")
+            }
         }
     };
     let block = panel_block(title, app.focus == Focus::Tracks);
@@ -210,16 +242,19 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         } else {
             "no disc in the selected drive"
         };
-        f.render_widget(
-            Paragraph::new(msg)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(block),
-            area,
-        );
+        draw_centered(f, block, area, msg);
         return;
     };
 
-    let visible = app.visible(area);
+    f.render_widget(Paragraph::new("").block(block), area);
+    let inner = area.inner(Margin::new(1, 1));
+    let slices = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    f.render_widget(
+        Paragraph::new(toc_subheader(app, toc, inner.width as usize)),
+        slices[0],
+    );
+
+    let visible = app.tracks_visible(area);
     let start = clamp_scroll(app.tracks_scroll, app.track_sel, toc.tracks.len(), visible);
     app.tracks_scroll = start;
 
@@ -232,31 +267,40 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         None => std::collections::HashMap::new(),
     };
 
-    let header = Row::new(vec!["#", "type", "start", "length", "title", "state"]).style(
+    let header = Row::new(vec!["#", "start", "length", "title", "state"]).style(
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = toc
+    let title_width = inner.width.saturating_sub(TOC_FIXED_WIDTH) as usize;
+    let table_rows: Vec<Row> = toc
         .tracks
         .iter()
         .enumerate()
         .skip(start)
         .take(visible)
         .map(|(i, t)| {
-            let style = if i == app.track_sel {
+            let selected = i == app.track_sel;
+            let base = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else if app.hover == Hover::Track(i) {
                 Style::default().add_modifier(Modifier::BOLD)
+            } else if !t.is_audio() {
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
-            let marker = if i == app.track_sel { "▶" } else { " " };
-            let (text, color) = state_cell(app.selected_rip_state().and_then(|s| s.states.get(i)));
+            let marker = if selected { "▶" } else { " " };
+            let title = if t.is_audio() {
+                titles.get(&t.number).copied().unwrap_or("—").to_string()
+            } else {
+                "data track".to_string()
+            };
+            let (text, color) =
+                state_cell(app.selected_rip_state().and_then(|s| s.states.get(i)), 18);
             Row::new(vec![
                 Cell::from(format!("{marker}{:>2}", t.number)),
-                Cell::from(t.kind.to_string()),
                 Cell::from(
                     t.start_msf()
                         .map_or_else(|| "?".to_string(), |m| m.to_string()),
@@ -264,54 +308,103 @@ fn draw_toc(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
                 Cell::from(fmt_duration(
                     t.frames(toc.end_lba(t.number).unwrap_or(toc.leadout_lba)),
                 )),
-                Cell::from(titles.get(&t.number).copied().unwrap_or("—")),
+                Cell::from(truncate_chars(&title, title_width.max(4))),
                 Cell::from(Span::styled(text, Style::default().fg(color))),
             ])
-            .style(style)
+            .style(base)
         })
         .collect();
 
-    // The panel now shares the width with the drives panel, so the title
-    // takes the slack and the rip state column stays readable.
+    // The fixed columns keep the state cell readable; the title takes the
+    // remaining width.
     let table = Table::new(
-        rows,
+        table_rows,
         [
             Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Length(9),
-            Constraint::Length(7),
-            Constraint::Min(8),
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Min(10),
             Constraint::Length(18),
         ],
     )
-    .header(header)
-    .block(block);
-    f.render_widget(table, area);
+    .header(header);
+    f.render_widget(table, slices[1]);
+}
+
+/// The line under the TOC panel's border: the disc id, track count, and total
+/// length on the left; the metadata match state on the right. The match state
+/// always keeps its place — the disc facts are what give way when the panel is
+/// narrow.
+fn toc_subheader(app: &App, toc: &Toc, width: usize) -> Line<'static> {
+    let total: u32 = toc
+        .tracks
+        .iter()
+        .filter(|t| t.is_audio())
+        .map(|t| t.frames(toc.end_lba(t.number).unwrap_or(toc.leadout_lba)))
+        .sum();
+    let disc = app
+        .disc_id
+        .as_deref()
+        .map(|id| format!("disc id {id}  "))
+        .unwrap_or_default();
+    let left = format!(
+        "{disc}{} tracks · {}",
+        toc.tracks.len(),
+        fmt_duration(total)
+    );
+    let right = app.toc_match_right();
+    let budget = if right.is_empty() {
+        width
+    } else {
+        width.saturating_sub(right.chars().count() + 1)
+    };
+    let left_len = left.chars().count();
+    let left: String = if left_len > budget {
+        if budget == 0 {
+            String::new()
+        } else {
+            let mut s: String = left.chars().take(budget - 1).collect();
+            s.push('…');
+            s
+        }
+    } else {
+        left
+    };
+    let gap = width.saturating_sub(left.chars().count());
+    let right: String = right.chars().take(gap.saturating_sub(1)).collect();
+    Line::from(vec![
+        Span::styled(
+            format!(
+                "{left}{}",
+                " ".repeat(gap.saturating_sub(right.chars().count()))
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(right, Style::default().fg(Color::Gray)),
+    ])
 }
 
 fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     let rip = app.selected_rip_state();
     let active = rip.is_some_and(|s| s.active);
-    let force = if app.force { "force on" } else { "force off" };
     let out_display = app
         .selected_rip_out_dir()
         .unwrap_or(app.out_dir.as_path())
         .display()
         .to_string();
-    let title = format!(
-        " Ripping to {} · {} · {force} ",
-        out_display,
-        app.format.label()
-    );
-    let block = Block::bordered()
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(title);
+    let mut title = format!(" Ripping to {out_display} · {}", app.format.label());
+    if app.force {
+        title.push_str(" · force on");
+    }
+    title.push(' ');
+    // The panel glows while its drive is actually ripping.
+    let block = panel_block(title, active);
     f.render_widget(Paragraph::new("").block(block), area);
     let inner = area.inner(Margin::new(1, 1));
-    let rows = Layout::vertical([
+    let slices = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Min(1),
+        Constraint::Length(1),
     ])
     .split(inner);
 
@@ -326,12 +419,16 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         match current_track(rip, app) {
             Some(n) => {
                 let count = app.rip_track_count().unwrap_or(0);
-                if count > 1 {
-                    // `{pct}` is the overall progress across the whole rip.
-                    format!("track {n:02}/{count:02}  {pct}%")
+                let position = if count > 1 {
+                    format!("track {n:02}/{count:02}")
                 } else {
-                    format!("track {n:02}  {pct}%")
-                }
+                    format!("track {n:02}")
+                };
+                let name = track_title(app, n)
+                    .map(|t| format!(" · {}", truncate_chars(&t, 24)))
+                    .unwrap_or_default();
+                // `{pct}` is the overall progress across the whole rip.
+                format!("{position}{name}  {pct}%")
             }
             None => "starting…".to_string(),
         }
@@ -340,12 +437,13 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     } else {
         "idle".to_string()
     };
+    let gauge_color = if active { Color::Cyan } else { Color::DarkGray };
     f.render_widget(
         Gauge::default()
             .ratio(ratio)
             .label(label)
-            .gauge_style(Style::default().fg(Color::Cyan)),
-        rows[0],
+            .gauge_style(Style::default().fg(gauge_color)),
+        slices[0],
     );
 
     let speed = rip.map(|s| s.speed).unwrap_or(0.0);
@@ -356,7 +454,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
             f64::INFINITY
         };
         format!(
-            "  speed {}   ETA {}   {}/{}",
+            "  {}   ETA {}   {}/{}",
             fmt_rate(speed),
             fmt_eta(eta),
             fmt_bytes(done),
@@ -367,62 +465,65 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     };
     f.render_widget(
         Paragraph::new(stats).style(Style::default().fg(Color::Gray)),
-        rows[1],
+        slices[1],
     );
 
     // The buttons are clickable, so they carry no keybind hints; the keys
     // still work and are listed in the help window (`?`).
-    let btns = Layout::horizontal([
-        Constraint::Length(18),
-        Constraint::Length(13),
-        Constraint::Length(10),
-        Constraint::Length(11),
-        Constraint::Length(10),
-    ])
-    .split(rows[2]);
-
     let can_rip = app.toc.is_some() && !active;
     let can_eject = app.drives.get(app.drive_sel).is_some_and(|d| !d.is_demo()) && !active;
-    draw_button(
-        f,
-        btns[0],
-        "rip selected",
-        can_rip,
-        app.hover == Hover::RipSelected,
-    );
-    draw_button(f, btns[1], "rip all", can_rip, app.hover == Hover::RipAll);
-    draw_button(f, btns[2], "tags", can_rip, app.hover == Hover::EditTags);
-    draw_button(f, btns[3], "eject", can_eject, app.hover == Hover::Eject);
-    draw_button(f, btns[4], "stop", active, app.hover == Hover::Stop);
-    regions.rip_selected = btns[0];
-    regions.rip_all = btns[1];
-    regions.edit_tags = btns[2];
-    regions.eject = btns[3];
-    regions.stop = btns[4];
+    let buttons: [(&str, bool, Hover); 5] = [
+        ("rip selected", can_rip, Hover::RipSelected),
+        ("rip all", can_rip, Hover::RipAll),
+        ("tags", can_rip, Hover::EditTags),
+        ("eject", can_eject, Hover::Eject),
+        ("stop", active, Hover::Stop),
+    ];
+    // Each button occupies its text plus the brackets and padding; the row
+    // is centered as a whole.
+    let slots: Vec<u16> = buttons
+        .iter()
+        .map(|(label, _, _)| label.len() as u16 + 6)
+        .collect();
+    let row_width: u16 = slots.iter().sum::<u16>() + 2 * (buttons.len() - 1) as u16;
+    let mut x = slices[2].x + (slices[2].width.saturating_sub(row_width)) / 2;
+    for ((label, enabled, hover), slot) in buttons.iter().zip(slots.iter()) {
+        let rect = Rect::new(x, slices[2].y, *slot, 1);
+        draw_button(f, rect, label, *enabled, app.hover == *hover);
+        match hover {
+            Hover::RipSelected => regions.rip_selected = rect,
+            Hover::RipAll => regions.rip_all = rect,
+            Hover::EditTags => regions.edit_tags = rect,
+            Hover::Eject => regions.eject = rect,
+            Hover::Stop => regions.stop = rect,
+            _ => {}
+        }
+        x += slot + 2;
+    }
 }
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
+    // The left carries the selected drive and its state; the right carries
+    // the current status message, or a nudge to the help window. The keybind
+    // hints live in the help window (`?`).
     let left = match app.drives.get(app.drive_sel) {
         Some(d) => format!(" {} · {} ", d.path, d.status),
         None => " no drives ".to_string(),
     };
-    // The keybind hints live in the help window now (`?`); the right side
-    // carries the current status message, or a nudge to the help window.
-    let (right, color) = match &app.status {
+    let (right, right_color) = match &app.status {
         Some(status) => (format!(" {status} "), Color::Yellow),
-        None if app.drive_ripping(app.drive_sel) => (String::new(), Color::Gray),
         None => (" ? for keybinds ".to_string(), Color::DarkGray),
     };
 
     let width = area.width as usize;
     let left_len = left.chars().count();
-    let room = width.saturating_sub(left_len + 2);
+    let room = width.saturating_sub(left_len + 1);
     let right: String = right.chars().take(room).collect();
     let pad = " ".repeat(room.saturating_sub(right.chars().count()));
     let line = Line::from(vec![
         Span::styled(left, Style::default().fg(Color::DarkGray)),
-        Span::raw(format!(" {pad} ")),
-        Span::styled(right, Style::default().fg(color)),
+        Span::raw(pad),
+        Span::styled(right, Style::default().fg(right_color)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -439,8 +540,10 @@ fn draw_help(f: &mut Frame) {
         height,
     };
     let block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Keybinds · press ? or esc to close ");
+    f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new("").block(block), rect);
 
     let rows = [
@@ -474,20 +577,22 @@ fn draw_help(f: &mut Frame) {
         })
         .chain(std::iter::once(Line::from(Span::raw(""))))
         .chain(std::iter::once(Line::from(Span::styled(
-            "mouse: click selects · double-click rips · wheel scrolls",
+            "click selects · double-click rips · wheel scrolls",
             Style::default().fg(Color::DarkGray),
         ))))
         .collect();
     f.render_widget(Paragraph::new(lines), rect.inner(Margin::new(1, 1)));
 }
 
-/// One action button. The brackets and the colors mark it as clickable
-/// rather than plain text: bold cyan brackets when enabled, the whole
-/// button inverted on hover, and a flat dark gray when disabled.
+/// One action button, sized to its slot. The brackets and the colors mark it
+/// as clickable rather than plain text: bold cyan brackets when enabled, the
+/// whole button inverted on hover, and a flat dark gray when disabled.
 fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: bool) {
+    let text = format!(" [ {label} ]");
+    let pad = " ".repeat((rect.width as usize).saturating_sub(text.chars().count() + 1));
     let spans: Vec<Span> = if enabled && hovered {
         vec![Span::styled(
-            format!(" [ {label} ] "),
+            format!("{text} {pad}"),
             Style::default().add_modifier(Modifier::REVERSED),
         )]
     } else {
@@ -498,15 +603,16 @@ fn draw_button(f: &mut Frame, rect: Rect, label: &str, enabled: bool, hovered: b
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let text = if enabled {
+        let body = if enabled {
             Style::default()
         } else {
             Style::default().fg(Color::DarkGray)
         };
         vec![
             Span::styled(" [ ", bracket),
-            Span::styled(label.to_string(), text),
-            Span::styled(" ] ", bracket),
+            Span::styled(format!("{label} "), body),
+            Span::styled("]", bracket),
+            Span::raw(pad),
         ]
     };
     f.render_widget(Paragraph::new(Line::from(spans)), rect);
@@ -525,8 +631,10 @@ fn draw_register_url(f: &mut Frame, url: &str) {
         height,
     };
     let block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Register disc id · press u or esc to close ");
+    f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new("").block(block), rect);
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
         .split(rect.inner(Margin::new(1, 1)));
@@ -555,8 +663,10 @@ fn draw_meta_edit(f: &mut Frame, summary: &str, edit: &mut MetaEdit) {
         height,
     };
     let block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Edit tags ");
+    f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new("").block(block), rect);
     let inner = rect.inner(Margin::new(1, 1));
     let rows = Layout::vertical([
@@ -585,24 +695,44 @@ fn draw_meta_edit(f: &mut Frame, summary: &str, edit: &mut MetaEdit) {
     f.render_widget(Paragraph::new(lines), rows[1]);
 
     f.render_widget(
-        Paragraph::new(" enter save · esc cancel · ↑↓/tab fields · ctrl-c cancel ")
+        Paragraph::new(" enter save · esc cancel · ↑↓/tab fields · ^c cancel")
             .style(Style::default().fg(Color::DarkGray)),
         rows[2],
     );
 }
 
-/// One editor line: the label, the value, and the cursor as a reversed bar.
-fn field_line(field: &EditField, selected: bool) -> Line<'_> {
-    let before = &field.value[..field.cursor];
+/// One editor line: the label and the value, the focused line highlighted,
+/// the cursor as the reversed character under it.
+fn field_line(field: &EditField, selected: bool) -> Line<'static> {
+    let before = field.value[..field.cursor].to_string();
     let after = &field.value[field.cursor..];
-    let text = format!("{before}▏{after}");
-    let label = format!("{:<12} ", field.label);
+    let cursor_char = after.chars().next().unwrap_or(' ');
+    let rest: String = after.chars().skip(1).collect();
+    let label = Span::styled(
+        format!("{:<12} ", field.label),
+        if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    );
     let value = if selected {
-        Span::styled(text, Style::default().add_modifier(Modifier::REVERSED))
+        vec![
+            Span::raw(before),
+            Span::styled(
+                cursor_char.to_string(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
+            Span::raw(rest),
+        ]
     } else {
-        Span::raw(text)
+        vec![Span::raw(format!("{before}{cursor_char}{rest}"))]
     };
-    Line::from(vec![Span::raw(label), value])
+    let mut spans = vec![label];
+    spans.extend(value);
+    Line::from(spans)
 }
 
 fn current_track(rip: Option<&crate::app::RipState>, app: &App) -> Option<u8> {
@@ -613,7 +743,18 @@ fn current_track(rip: Option<&crate::app::RipState>, app: &App) -> Option<u8> {
     app.toc.as_ref()?.tracks.get(idx).map(|t| t.number)
 }
 
-fn state_cell(state: Option<&TrackState>) -> (String, Color) {
+/// The looked-up title of the track with the given number, if any.
+fn track_title(app: &App, number: u8) -> Option<String> {
+    let toc = app.toc.as_ref()?;
+    let ordinal = toc.audio_tracks().position(|t| t.number == number)?;
+    app.selected_meta()?
+        .track(ordinal + 1)
+        .map(|t| t.title.clone())
+}
+
+/// The per-track state cell: a dash when idle, a small progress bar while
+/// the track is being read, and the outcome once it has finished.
+fn state_cell(state: Option<&TrackState>, width: usize) -> (String, Color) {
     match state {
         None | Some(TrackState::Idle) => ("—".to_string(), Color::DarkGray),
         Some(TrackState::Ripping {
@@ -623,17 +764,45 @@ fn state_cell(state: Option<&TrackState>) -> (String, Color) {
             let pct = *bytes_done * 100 / (*bytes_total).max(1);
             (
                 format!(
-                    "{pct:3}%  {}/{}",
-                    fmt_bytes(*bytes_done),
-                    fmt_bytes(*bytes_total)
+                    "{} {pct:3}%",
+                    state_bar(*bytes_done, *bytes_total, STATE_BAR)
                 ),
-                Color::Yellow,
+                Color::Cyan,
             )
         }
-        Some(TrackState::Done { bytes }) => (format!("done  {}", fmt_bytes(*bytes)), Color::Green),
-        Some(TrackState::Failed(e)) => (format!("failed  {e}"), Color::Red),
-        Some(TrackState::Skipped(r)) => (format!("skipped  {r}"), Color::DarkGray),
+        Some(TrackState::Done { bytes }) => (format!("✓ done {}", fmt_bytes(*bytes)), Color::Green),
+        Some(TrackState::Failed(e)) => (
+            format!("✗ {}", truncate_chars(e, width.saturating_sub(2))),
+            Color::Red,
+        ),
+        Some(TrackState::Skipped(r)) => (
+            format!("↷ {}", truncate_chars(r, width.saturating_sub(2))),
+            Color::DarkGray,
+        ),
     }
+}
+
+/// A small `█░` progress bar of the given width.
+fn state_bar(done: u64, total: u64, width: usize) -> String {
+    let filled = if total > 0 {
+        ((done as f64 / total as f64) * width as f64).round() as usize
+    } else {
+        0
+    }
+    .min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Truncates a string to at most `width` characters, marking the cut with
+/// an ellipsis.
+fn truncate_chars(s: &str, width: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if width == 0 || chars.len() <= width {
+        return s.to_string();
+    }
+    let mut out: String = chars[..width - 1].iter().collect();
+    out.push('…');
+    out
 }
 
 fn status_color(status: &str) -> Color {

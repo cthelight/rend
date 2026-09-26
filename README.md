@@ -153,10 +153,11 @@ editor) fills the rest of the window on the right; `?` opens a window
 with every keybind.
 
 When a disc's table of contents is loaded, the disc is looked up on
-MusicBrainz in the background; the TOC panel then shows the track titles
-and the panel header shows artist, album, and year. If the lookup finds
-several candidate releases, the header shows `match i of n` and `m`
-switches to the next one, re-fetching its cover art; rips are tagged with
+MusicBrainz in the background; the TOC panel then shows the track titles,
+the selected release as the panel title, and the disc id, track count,
+and total length in a subheader under it. If the lookup finds several
+candidate releases, the subheader shows `match i of n` and `m` switches
+to the next one, re-fetching its cover art; rips are tagged with
 whichever match is selected. Ripped tracks carry the looked-up metadata
 and cover art, embedded the same way as in the CLI (best effort — a
 failed lookup never blocks a rip).
@@ -165,8 +166,8 @@ failed lookup never blocks a rip).
 artist, year, and a title and artist per track. `enter` saves, `esc`
 (or `ctrl-c`) cancels, `↑`/`↓` and `tab`/`shift+tab` move between fields.
 If the lookup found no candidates, `t` still opens the editor on a blank
-"manual" entry (marked `manual ·` in the header), so an unmatched disc
-can be tagged by hand; rips of it use those tags.
+"manual" entry (marked `manual` in the TOC subheader), so an unmatched
+disc can be tagged by hand; rips of it use those tags.
 
 When more than one drive is present, several can rip at the same time:
 each drive keeps its own rip state, so you can start a rip on one drive

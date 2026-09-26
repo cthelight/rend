@@ -44,6 +44,10 @@ pub enum Hover {
     Stop,
 }
 
+/// The rows the TOC panel spends above the track rows: the subheader and
+/// the column headers.
+pub const TRACKS_HEADER_ROWS: u16 = 2;
+
 /// Screen regions for mouse hit-testing, filled in during each draw.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Regions {
@@ -69,17 +73,15 @@ impl Regions {
         (idx < count).then_some(idx)
     }
 
-    /// The track index under the given position, if any.
+    /// The track index under the given position, if any. The first track
+    /// row sits [`TRACKS_HEADER_ROWS`] rows below the panel's inner top
+    /// edge: the subheader and the column headers take the rows above it.
     pub fn track_at(&self, col: u16, row: u16, scroll: usize, count: usize) -> Option<usize> {
-        self.row_at(self.tracks, col, row, scroll, count)
-    }
-
-    fn row_at(&self, rect: Rect, col: u16, row: u16, scroll: usize, count: usize) -> Option<usize> {
-        let inner = rect.inner(Margin::new(1, 1));
+        let inner = self.tracks.inner(Margin::new(1, 1));
         if !inner.contains(Position::new(col, row)) {
             return None;
         }
-        let idx = (row - inner.y) as usize + scroll;
+        let idx = row.saturating_sub(inner.y + TRACKS_HEADER_ROWS) as usize + scroll;
         (idx < count).then_some(idx)
     }
 }
@@ -460,6 +462,10 @@ pub struct App {
     meta_rx: Option<mpsc::Receiver<MetaEvent>>,
     /// The sender of the background worker channel, shared by all of them.
     meta_tx: Option<mpsc::Sender<MetaEvent>>,
+    /// `true` while the candidate-lookup worker for the selected disc is
+    /// still running: the subheader shows the disc as unmatched until it
+    /// lands.
+    meta_in_flight: bool,
     /// Generation counter invalidating in-flight lookups on disc changes.
     meta_gen: u64,
     /// Lookups and covers this session has already fetched, so re-reading
@@ -508,6 +514,7 @@ impl App {
             editing: None,
             meta_rx: None,
             meta_tx: None,
+            meta_in_flight: false,
             meta_gen: 0,
             meta_cache: MetaCache::new(),
             track_sel: 0,
@@ -583,6 +590,7 @@ impl App {
         self.cover = None;
         self.editing = None;
         self.url_modal = false;
+        self.meta_in_flight = false;
         self.remember_album();
         let idx = self.drive_sel;
         if self.drives[idx].is_demo() {
@@ -638,6 +646,7 @@ impl App {
         self.meta_rx = None;
         self.meta_tx = None;
         self.meta_gen += 1;
+        self.meta_in_flight = false;
         self.remember_album();
         if let Some(rip) = self.rips.get_mut(&selected) {
             rip.state.states.clear();
@@ -672,6 +681,7 @@ impl App {
         self.cover = None;
         self.meta_rx = None;
         self.meta_tx = None;
+        self.meta_in_flight = false;
         if self.drives[self.drive_sel].is_demo() {
             self.meta = Some(demo_meta_all());
             self.status = Some(self.match_status().unwrap_or_default());
@@ -692,6 +702,7 @@ impl App {
         let lookup_id = self.meta_gen + 1;
         self.meta_gen = lookup_id;
         self.status = Some("looking up metadata…".into());
+        self.meta_in_flight = true;
         let (tx, rx) = mpsc::channel();
         self.meta_rx = Some(rx);
         self.meta_tx = Some(tx.clone());
@@ -754,7 +765,10 @@ impl App {
                             self.toc = Some(toc);
                             self.focus = Focus::Tracks;
                         }
-                        Err(e) => self.status = Some(format!("no TOC: {e}")),
+                        Err(e) => {
+                            self.meta_in_flight = false;
+                            self.status = Some(format!("no TOC: {e}"));
+                        }
                     }
                 }
                 MetaEvent::Candidates {
@@ -769,6 +783,7 @@ impl App {
                     if id != self.meta_gen {
                         continue;
                     }
+                    self.meta_in_flight = false;
                     if candidates.is_empty() {
                         self.status = Some("no release matched the disc".into());
                         continue;
@@ -814,6 +829,7 @@ impl App {
                         continue;
                     }
                     self.status = Some(format!("metadata lookup failed: {reason}"));
+                    self.meta_in_flight = false;
                     self.meta_rx = None;
                     self.meta_tx = None;
                 }
@@ -829,7 +845,7 @@ impl App {
     /// The selected candidate as `artist — album (year)`, for the drives
     /// panel. `None` while the lookup is pending or when nothing is filled
     /// in yet.
-    fn album_summary(&self) -> Option<String> {
+    pub(crate) fn album_summary(&self) -> Option<String> {
         let disc = self.selected_meta()?;
         if disc.album.is_empty() && disc.artist.is_empty() {
             return None;
@@ -897,6 +913,35 @@ impl App {
             .map(|p| format!(" · disc {p}"))
             .unwrap_or_default();
         Some(format!("{prefix}{artist} — {album}{year}{disc_position}"))
+    }
+
+    /// `true` while the selected disc's metadata lookup is still running in
+    /// the background.
+    pub fn meta_pending(&self) -> bool {
+        self.meta_in_flight
+    }
+
+    /// The right-hand end of the TOC subheader: which candidate is selected,
+    /// or that the lookup is still pending.
+    pub fn toc_match_right(&self) -> String {
+        if self.meta_pending() {
+            return "looking up metadata…".into();
+        }
+        let Some(candidates) = self.meta.as_ref() else {
+            return String::new();
+        };
+        let Some(disc) = candidates.get(self.meta_sel) else {
+            return String::new();
+        };
+        // The panel title already carries the selected match's disc
+        // position, so it is not repeated here.
+        if candidates.len() > 1 {
+            format!("match {} of {}", self.meta_sel + 1, candidates.len())
+        } else if disc.release_id.is_empty() {
+            "manual".into()
+        } else {
+            String::new()
+        }
     }
 
     /// Switches to the next candidate match, wrapping around.
@@ -1120,6 +1165,7 @@ impl App {
         self.meta_gen += 1;
         self.meta_rx = None;
         self.meta_tx = None;
+        self.meta_in_flight = false;
         self.cover = None;
         self.meta = Some(vec![DiscMeta {
             album: String::new(),
@@ -1261,12 +1307,11 @@ impl App {
                 let pos = Position::new(mouse.column, mouse.row);
                 if self.regions.drives.contains(pos) {
                     self.focus = Focus::Drives;
-                    // The drives panel shows two lines per entry.
                     self.drives_scroll = scroll(
                         self.drives_scroll,
                         down,
                         self.drives.len(),
-                        self.visible(self.regions.drives) / 2,
+                        self.drives_visible(self.regions.drives),
                     );
                 } else if self.regions.tracks.contains(pos) {
                     self.focus = Focus::Tracks;
@@ -1274,7 +1319,7 @@ impl App {
                         self.tracks_scroll,
                         down,
                         self.track_count(),
-                        self.visible(self.regions.tracks),
+                        self.tracks_visible(self.regions.tracks),
                     );
                 }
             }
@@ -1466,9 +1511,19 @@ impl App {
         self.toc.as_ref().map_or(0, |t| t.tracks.len())
     }
 
-    /// The number of visible rows in a bordered panel of the given rect.
-    pub fn visible(&self, rect: Rect) -> usize {
-        rect.height.saturating_sub(2) as usize
+    /// The number of visible drive entries in a bordered panel of the given
+    /// rect. Each entry is two lines tall: the name, then the album.
+    pub fn drives_visible(&self, rect: Rect) -> usize {
+        (rect.height.saturating_sub(2) / 2) as usize
+    }
+
+    /// The number of visible track rows in a bordered panel of the given
+    /// rect, past the subheader and column-header rows.
+    pub fn tracks_visible(&self, rect: Rect) -> usize {
+        (rect
+            .height
+            .saturating_sub(2)
+            .saturating_sub(TRACKS_HEADER_ROWS)) as usize
     }
 
     pub fn rip_selected_track(&mut self) {
@@ -1529,6 +1584,7 @@ impl App {
                 self.meta_rx = None;
                 self.meta_tx = None;
                 self.meta_gen += 1;
+                self.meta_in_flight = false;
                 self.remember_album();
                 self.rips.remove(&idx);
                 self.status = Some(format!("ejecting {}", self.drives[idx].path));
@@ -2206,7 +2262,7 @@ mod tests {
         with_tracks_rect(&mut app);
 
         app.handle_key(key('t'));
-        // Track 2's row; a click would normally select it.
+        // A track row; a click would normally select it.
         app.handle_mouse(click(10, 6));
 
         assert_eq!(app.track_sel, 0);
@@ -2370,7 +2426,8 @@ mod tests {
         assert_eq!(app.drives[0].status, "disc present");
     }
 
-    /// A TOC panel rect whose inner rows start at y = 4.
+    /// A TOC panel rect whose inner rows start at y = 4, so the first track
+    /// row (past the subheader and column headers) is at y = 6.
     fn with_tracks_rect(app: &mut App) {
         app.regions.tracks = Rect {
             x: 0,
@@ -2396,8 +2453,8 @@ mod tests {
         let mut app = demo_app(dir.path());
         with_tracks_rect(&mut app);
 
-        // Track index 2 is at row inner.y (4) + 2 = 6.
-        app.handle_mouse(click(10, 6));
+        // Track index 2 is at row inner.y (4) + 2 header rows + 2 = 8.
+        app.handle_mouse(click(10, 8));
 
         assert_eq!(app.track_sel, 2);
         assert_eq!(app.focus, Focus::Tracks);
@@ -2422,8 +2479,9 @@ mod tests {
         let mut app = demo_app(dir.path());
         with_tracks_rect(&mut app);
 
-        app.handle_mouse(click(10, 6));
-        app.handle_mouse(click(10, 6));
+        // Track index 2 is at row inner.y (4) + 2 header rows + 2 = 8.
+        app.handle_mouse(click(10, 8));
+        app.handle_mouse(click(10, 8));
 
         assert!(app.drive_ripping(app.drive_sel));
         drain_until_finished(&mut app, Duration::from_secs(10));
@@ -2441,6 +2499,7 @@ mod tests {
         let mut app = demo_app(dir.path());
         with_tracks_rect(&mut app);
 
+        // Row 6 is the first track row: inner.y (4) + the 2 header rows.
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Moved,
             column: 10,
@@ -2448,7 +2507,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.hover, Hover::Track(2));
+        assert_eq!(app.hover, Hover::Track(0));
     }
 
     #[test]
