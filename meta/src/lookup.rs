@@ -375,9 +375,10 @@ fn to_disc_meta(release: &MbRelease, medium: Option<&MbMedium>) -> DiscMeta {
                 .collect()
         })
         .unwrap_or_default();
-    // Disc numbers only mean something on a multi-disc release, so a
-    // single-disc one carries none at all.
-    let multi = release.medium_count > 1;
+    // The discid responses carry no medium count of their own, but the
+    // server always includes every medium of the release, so the media
+    // array is the count.
+    let multi = release.media.len() > 1;
     let disc_number = if multi {
         medium.and_then(|m| (m.position > 0).then_some(m.position))
     } else {
@@ -391,7 +392,7 @@ fn to_disc_meta(release: &MbRelease, medium: Option<&MbMedium>) -> DiscMeta {
         release_id: release.id.clone(),
         release_artist_id,
         disc_number,
-        disc_count: multi.then_some(release.medium_count),
+        disc_count: multi.then_some(release.media.len() as u32),
         tracks,
     }
 }
@@ -533,8 +534,6 @@ struct MbRelease {
     date: Option<String>,
     #[serde(default)]
     media: Vec<MbMedium>,
-    #[serde(default, rename = "medium-count")]
-    medium_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -655,7 +654,6 @@ mod tests {
           "title": "The Album",
           "artist-credit": [ { "name": "The Band" } ],
           "date": "1997-05-20",
-          "medium-count": 2,
           "media": [
             {
               "position": 1,
@@ -712,6 +710,126 @@ mod tests {
                 { "title": "A", "length": 20100 },
                 { "title": "B", "length": 10600 },
                 { "title": "C", "length": 11400 }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    "#;
+
+    /// A live discid response, trimmed: every key the server actually
+    /// emits, which carries no medium count at all.
+    const LIVE: &str = r#"
+    {
+      "id": "zBKu_qLsePCfpQjFYsu0ExWyB2E-",
+      "offset-count": 8,
+      "sectors": 186226,
+      "offsets": [150, 35807, 44077, 64415, 90213, 95123, 124348, 141390],
+      "releases": [
+        {
+          "id": "e0f3b9a5-9eca-4fee-9d15-55f42f6b2636",
+          "title": "Eph Reissue",
+          "artist-credit": [
+            {
+              "name": "Fridge",
+              "joinphrase": "",
+              "artist": {
+                "id": "601b575c-9ef8-45a7-81df-3bc48216ca5f",
+                "name": "Fridge",
+                "sort-name": "Fridge",
+                "type": "Group",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "country": "GB",
+                "disambiguation": "UK post rock band"
+              }
+            }
+          ],
+          "asin": "B00000JOIY",
+          "barcode": "656605304823",
+          "country": "US",
+          "date": "2002-04",
+          "disambiguation": "",
+          "packaging": "Jewel Case",
+          "packaging-id": "ec27701a-4a22-37f4-bfac-6616e0f9750a",
+          "quality": "normal",
+          "status": "Official",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "text-representation": { "language": "eng", "script": "Latn" },
+          "release-events": [
+            {
+              "date": "2002-04",
+              "area": {
+                "id": "489ce91b-6658-3307-9877-795b68554c98",
+                "name": "United States",
+                "iso-3166-1-codes": ["US"]
+              }
+            }
+          ],
+          "cover-art-archive": {
+            "artwork": true,
+            "darkened": false,
+            "front": true,
+            "back": false,
+            "count": 1
+          },
+          "media": [
+            {
+              "id": "0b470036-997f-307c-9de3-0f300597f5d4",
+              "position": 1,
+              "title": "Eph",
+              "format": "CD",
+              "format-id": "9712d52a-4509-3d4b-a1a2-67c88c643e31",
+              "track-count": 8,
+              "track-offset": 0,
+              "discs": [
+                {
+                  "id": "zBKu_qLsePCfpQjFYsu0ExWyB2E-",
+                  "offset-count": 8,
+                  "offsets": [150, 35807, 44077, 64415, 90213, 95123, 124348, 141390],
+                  "sectors": 186226
+                }
+              ],
+              "tracks": [
+                {
+                  "position": 1,
+                  "id": "932ae747-c913-3ad6-b68e-beb488ba07be",
+                  "title": "Ark",
+                  "length": 475426,
+                  "recording": {
+                    "id": "7645f053-a7d5-49e2-97b2-95c846875736",
+                    "title": "Ark",
+                    "length": 475426,
+                    "first-release-date": "1999-04",
+                    "disambiguation": "",
+                    "video": false
+                  }
+                }
+              ]
+            },
+            {
+              "id": "538511c8-09eb-3928-a281-faadb2b52ae0",
+              "position": 2,
+              "title": "Kinoshita Terasaka, Of EP and Remixes",
+              "format": "CD",
+              "format-id": "9712d52a-4509-3d4b-a1a2-67c88c643e31",
+              "track-count": 8,
+              "track-offset": 0,
+              "discs": [
+                {
+                  "id": "1xOiBOfHFVJmwmdGpP.gT1DlrAo-",
+                  "offset-count": 8,
+                  "offsets": [150, 22852, 71281, 94942, 134071, 169673, 208917, 239542],
+                  "sectors": 262615
+                }
+              ],
+              "tracks": [
+                {
+                  "position": 1,
+                  "number": "1",
+                  "id": "rt-k1",
+                  "title": "Kinoshita"
+                }
               ]
             }
           ]
@@ -784,6 +902,20 @@ mod tests {
         assert_eq!(meta.disc_number, Some(1));
         assert_eq!(meta.disc_count, Some(2));
         assert_eq!(meta.disc_position().as_deref(), Some("1/2"));
+    }
+
+    /// The server never sends a medium count, so a real response must still
+    /// yield the disc position from the media it does carry.
+    #[test]
+    fn the_live_response_shape_yields_the_disc_position() {
+        let cdtoc: MbCdtoc = serde_json::from_str(LIVE).unwrap();
+        let (release, medium) =
+            pick_release_and_medium(&cdtoc.releases, "zBKu_qLsePCfpQjFYsu0ExWyB2E-").unwrap();
+        let meta = to_disc_meta(release, medium);
+        assert_eq!(meta.disc_number, Some(1));
+        assert_eq!(meta.disc_count, Some(2));
+        assert_eq!(meta.disc_position().as_deref(), Some("1/2"));
+        assert_eq!(meta.tracks[0].title, "Ark");
     }
 
     #[test]
@@ -920,7 +1052,11 @@ mod tests {
     #[test]
     fn rank_carries_disc_position_for_multi_disc() {
         let releases: MbReleaseList = serde_json::from_str(
-            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "medium-count": 2, "media": [
+            r#"{"releases": [{"id": "r", "title": "T", "artist-credit": [], "media": [
+                {"position": 1, "tracks": [
+                    { "title": "D", "length": 50000 },
+                    { "title": "E", "length": 60000 }
+                ]},
                 {"position": 2, "tracks": [
                     { "title": "A", "length": 20100 },
                     { "title": "B", "length": 10600 },
