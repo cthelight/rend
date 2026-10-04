@@ -1,5 +1,7 @@
 //! Serializable views of server state, shaped for the frontend.
 
+use std::sync::Arc;
+
 use axum::response::sse::Event;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -38,7 +40,7 @@ pub struct DriveView {
     pub match_sel: usize,
     pub meta: Option<MetaView>,
     /// Cover art as a base64 data URL, if fetched.
-    pub cover: Option<String>,
+    pub cover: Option<Arc<String>>,
     pub cover_fetching: bool,
     pub rip: Option<RipView>,
 }

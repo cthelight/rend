@@ -102,8 +102,9 @@ pub struct Drive {
     pub match_sel: usize,
     pub meta: Option<DiscMeta>,
     pub cover: Option<Vec<u8>>,
-    /// The cached data-URL encoding of `cover`, so views never re-encode.
-    pub cover_data: Option<String>,
+    /// The cached data-URL encoding of `cover`, shared with every view
+    /// snapshot so building one only bumps a reference.
+    pub cover_data: Option<Arc<String>>,
     pub cover_fetching: bool,
     pub meta_edited: bool,
     pub rip: Option<RipControl>,
@@ -1348,7 +1349,7 @@ impl Drive {
         let candidates = demo_candidates();
         let meta = candidates.first().map(|c| c.meta.clone());
         let cover = Some(demo_cover());
-        let cover_data = cover.as_deref().and_then(cover_data_url);
+        let cover_data = cover.as_deref().and_then(cover_data_url).map(Arc::new);
         Self {
             path: DEMO_DEVICE.to_string(),
             label: DEMO_LABEL.to_string(),
@@ -1430,7 +1431,7 @@ impl Drive {
 
     /// Replaces the cover art and refreshes its cached data-URL encoding.
     fn set_cover(&mut self, cover: Option<Vec<u8>>) {
-        self.cover_data = cover.as_deref().and_then(cover_data_url);
+        self.cover_data = cover.as_deref().and_then(cover_data_url).map(Arc::new);
         self.cover = cover;
     }
 
