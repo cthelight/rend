@@ -195,15 +195,20 @@ pub struct TrackStateView {
 }
 
 /// A rip worker event, as pushed to the frontend.
+///
+/// Variant tags and field names are camelCase, matching the rest of the
+/// wire protocol (the `StateView` snapshot) and the frontend's expectations.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(tag = "event", rename_all = "camelCase")]
 pub enum RipEventView {
     TrackStarted {
         number: u8,
     },
     Progress {
         number: u8,
+        #[serde(rename = "bytesDone")]
         bytes_done: u64,
+        #[serde(rename = "bytesTotal")]
         bytes_total: u64,
     },
     TrackDone {
@@ -269,9 +274,10 @@ impl From<&RipEvent> for RipEventView {
     }
 }
 
-/// Events pushed over the SSE stream.
+/// Events pushed over the SSE stream, tagged camelCase like the rest of
+/// the wire protocol.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerEvent {
     /// The whole drive view changed (low frequency).
     DriveChanged { drive: Box<DriveView> },
@@ -350,6 +356,33 @@ mod tests {
         assert_eq!(json["type"], "resync");
         assert_eq!(json["skipped"], 3);
 
+        // Multi-word tags must come out camelCase, exactly as the
+        // frontend's event switch matches them.
+        let ev = ServerEvent::DriveChanged {
+            drive: Box::new(DriveView {
+                index: 0,
+                path: "/dev/sr0".into(),
+                label: "sr0".into(),
+                status: "ready".into(),
+                disc: None,
+                demo: false,
+                loading_toc: false,
+                toc: None,
+                mcn: None,
+                register_url: None,
+                lookup_status: "idle".into(),
+                matches: Vec::new(),
+                match_sel: 0,
+                meta: None,
+                cover: None,
+                cover_fetching: false,
+                rip: None,
+            }),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["type"], "driveChanged");
+        assert_eq!(json["drive"]["path"], "/dev/sr0");
+
         let ev = ServerEvent::Rip {
             drive: "/dev/sr0".into(),
             event: RipEventView::Progress {
@@ -362,5 +395,18 @@ mod tests {
         assert_eq!(json["type"], "rip");
         assert_eq!(json["event"]["event"], "progress");
         assert_eq!(json["event"]["number"], 2);
+        // The progress byte fields are camelCase on the wire too.
+        assert_eq!(json["event"]["bytesDone"], 1);
+        assert_eq!(json["event"]["bytesTotal"], 2);
+
+        let json = serde_json::to_value(&RipEventView::TrackStarted { number: 1 }).unwrap();
+        assert_eq!(json["event"], "trackStarted");
+        let json = serde_json::to_value(&RipEventView::TrackDone {
+            number: 1,
+            path: "x".into(),
+            bytes: 2,
+        })
+        .unwrap();
+        assert_eq!(json["event"], "trackDone");
     }
 }
