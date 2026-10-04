@@ -882,9 +882,9 @@ impl AppState {
     }
 
     fn poll_drive(&self, index: usize) {
-        let (changed, need_load) = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
-            let Some(drive) = drives.get_mut(index) else {
+        let path = {
+            let drives = self.drives.lock().expect("drives lock poisoned");
+            let Some(drive) = drives.get(index) else {
                 return;
             };
             if drive.demo {
@@ -894,13 +894,20 @@ impl AppState {
             if drive.rip.as_ref().is_some_and(|rip| rip.active) {
                 return;
             }
+            drive.path.clone()
+        };
+        // The blocking ioctls run outside the drive lock, so a slow or
+        // unreadable drive cannot stall the view and the action handlers.
+        let info = read_drive_info(&path);
+        let (changed, need_load) = {
+            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let Some(drive) = drives.get_mut(index) else {
+                return;
+            };
             let old_label = drive.label.clone();
             let old_status = drive.status.clone();
             let old_disc = drive.disc.clone();
-            drive.refresh();
-            if !matches!(drive.last_status, Some(DriveStatus::DiscOk)) && drive.toc.is_some() {
-                drive.clear_disc_state();
-            }
+            drive.apply_poll(info);
             let need_load = drive.last_status == Some(DriveStatus::DiscOk)
                 && drive.toc.is_none()
                 && !drive.loading_toc
@@ -1212,22 +1219,42 @@ impl Drive {
     }
 
     fn refresh(&mut self) {
-        let Ok(device) = Device::open(&self.path) else {
-            self.status = "unreadable".to_string();
-            self.disc = None;
-            self.last_status = None;
-            return;
-        };
-        match device.info() {
-            Ok(info) => {
+        self.apply_info(read_drive_info(&self.path));
+    }
+
+    /// Applies a drive status read to the drive.
+    ///
+    /// `None` means the drive could not be read at all (device missing or a
+    /// transient error). The last known status is cleared so callers don't
+    /// act on a stale one, but the loaded disc and any user edits are kept:
+    /// a read blip is not a disc removal.
+    fn apply_info(&mut self, info: Option<DeviceInfo>) {
+        match info {
+            Some(info) => {
                 self.label = drive_label(&info);
                 self.status = info.drive_status.to_string();
                 self.disc = info.disc_status.map(|status| status.to_string());
                 self.last_status = Some(info.drive_status);
             }
-            Err(_) => {
+            None => {
                 self.status = "unreadable".to_string();
+                self.disc = None;
+                self.last_status = None;
             }
+        }
+    }
+
+    /// Applies a polled drive status, clearing the loaded disc state when
+    /// the drive positively reports an empty tray. Transient states (an
+    /// unreadable drive, "not ready", "no information") keep it.
+    fn apply_poll(&mut self, info: Option<DeviceInfo>) {
+        let removed = matches!(
+            info.as_ref().map(|info| info.drive_status),
+            Some(DriveStatus::NoDisc | DriveStatus::TrayOpen)
+        );
+        self.apply_info(info);
+        if removed && self.toc.is_some() {
+            self.clear_disc_state();
         }
     }
 
@@ -1438,6 +1465,13 @@ fn disc_toc(toc: &Toc) -> DiscToc {
         offsets: toc.audio_tracks().map(|track| track.start_lba).collect(),
         leadout: toc.leadout_lba,
     }
+}
+
+/// Reads a drive's status, `None` when the device cannot be opened or
+/// read. A free function so the blocking ioctls can run outside the
+/// drive lock.
+fn read_drive_info(path: &str) -> Option<DeviceInfo> {
+    Device::open(path).ok()?.info().ok()
 }
 
 fn read_toc(path: &str) -> Result<(Toc, Option<String>), String> {
@@ -1679,6 +1713,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), false);
         assert!(state.eject(0).is_err());
+    }
+
+    fn loaded_drive() -> Drive {
+        Drive {
+            path: "/dev/sr9".into(),
+            label: "sr9".into(),
+            status: "disc present".into(),
+            disc: Some("audio".into()),
+            demo: false,
+            loading_toc: false,
+            toc_failed: false,
+            toc: Some(DemoDisc::new().toc),
+            mcn: Some("MCN".into()),
+            register_url: Some("https://musicbrainz.org".into()),
+            lookup_status: "found".into(),
+            candidates: Vec::new(),
+            match_sel: 0,
+            meta: Some(blank_meta()),
+            cover: None,
+            cover_data: None,
+            cover_fetching: false,
+            meta_edited: true,
+            rip: None,
+            meta_gen: 2,
+            last_status: Some(DriveStatus::DiscOk),
+        }
+    }
+
+    fn drive_info(status: DriveStatus) -> DeviceInfo {
+        DeviceInfo {
+            path: "/dev/sr9".into(),
+            drive_status: status,
+            disc_status: None,
+            vendor: None,
+            model: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn an_unreadable_blip_keeps_the_loaded_disc() {
+        let mut drive = loaded_drive();
+        drive.apply_info(None);
+
+        assert_eq!(drive.status, "unreadable");
+        assert_eq!(drive.disc, None);
+        assert_eq!(drive.last_status, None);
+        assert!(drive.toc.is_some());
+        assert_eq!(drive.lookup_status, "found");
+        assert!(drive.meta_edited);
+    }
+
+    #[test]
+    fn a_positive_empty_tray_clears_the_loaded_disc() {
+        let mut drive = loaded_drive();
+        drive.apply_poll(Some(drive_info(DriveStatus::NoDisc)));
+
+        assert_eq!(drive.status, "no disc");
+        assert!(drive.toc.is_none());
+        assert!(drive.mcn.is_none());
+        assert_eq!(drive.lookup_status, "no disc");
+        assert!(!drive.meta_edited);
+    }
+
+    #[test]
+    fn a_transient_status_keeps_the_loaded_disc() {
+        for status in [DriveStatus::NoInfo, DriveStatus::DriveNotReady] {
+            let mut drive = loaded_drive();
+            drive.apply_poll(Some(drive_info(status)));
+
+            assert_eq!(drive.last_status, Some(status));
+            assert!(drive.toc.is_some(), "{status:?} must not clear the disc");
+        }
     }
 
     #[test]
