@@ -40,7 +40,7 @@ pub struct AppState {
     events: broadcast::Sender<ServerEvent>,
     out_dir: PathBuf,
     ffmpeg: bool,
-    meta_tx: mpsc::Sender<MetaEvent>,
+    meta_tx: Mutex<mpsc::Sender<MetaEvent>>,
     meta_rx: Mutex<Option<mpsc::Receiver<MetaEvent>>>,
     running: AtomicBool,
     tick_handle: Mutex<Option<JoinHandle<()>>>,
@@ -212,7 +212,7 @@ impl AppState {
             events,
             out_dir,
             ffmpeg,
-            meta_tx,
+            meta_tx: Mutex::new(meta_tx),
             meta_rx: Mutex::new(Some(meta_rx)),
             running: AtomicBool::new(false),
             tick_handle: Mutex::new(None),
@@ -239,12 +239,33 @@ impl AppState {
         {
             return;
         }
+        self.arm_meta();
         let state = self.arc();
         let handle = std::thread::Builder::new()
             .name("rend-web".into())
             .spawn(move || state.run())
             .expect("failed to spawn the web state thread");
         *self.tick_handle.lock().expect("state lock poisoned") = Some(handle);
+    }
+
+    /// Gives the meta pipeline a live channel.
+    ///
+    /// The first `run` consumes the receiver, so a restart needs a fresh
+    /// channel. Readers still in flight from the previous run now report
+    /// into the void, so their pending state is dropped and the poll can
+    /// retry the read.
+    fn arm_meta(&self) {
+        let mut rx = self.meta_rx.lock().expect("meta receiver lock poisoned");
+        if rx.is_some() {
+            return;
+        }
+        let (tx, new_rx) = mpsc::channel();
+        *self.meta_tx.lock().expect("meta sender lock poisoned") = tx;
+        *rx = Some(new_rx);
+        for drive in self.drives.lock().expect("drives lock poisoned").iter_mut() {
+            drive.loading_toc = false;
+            drive.cover_fetching = false;
+        }
     }
 
     /// Stops any running rips and joins the background poll/meta thread.
@@ -707,8 +728,12 @@ impl AppState {
             (drive.path.clone(), drive.meta_gen)
         };
         self.drive_changed(index);
-        let tx = self.meta_tx.clone();
-        std::thread::Builder::new()
+        let tx = self
+            .meta_tx
+            .lock()
+            .expect("meta sender lock poisoned")
+            .clone();
+        let spawned = std::thread::Builder::new()
             .name(format!("rend-web-toc-{index}"))
             .spawn(move || {
                 let result = read_toc(&path);
@@ -719,7 +744,30 @@ impl AppState {
                 })
                 .ok();
             })
-            .ok();
+            .is_ok();
+        if !spawned {
+            let stale = {
+                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                match drives.get_mut(index) {
+                    Some(drive) if drive.meta_gen == id => {
+                        drive.loading_toc = false;
+                        drive.toc_failed = true;
+                        drive.lookup_status =
+                            "TOC read failed: could not start the reader".to_string();
+                        false
+                    }
+                    Some(_) => true,
+                    None => true,
+                }
+            };
+            if !stale {
+                self.drive_changed(index);
+                self.emit_log(format!(
+                    "{}: could not start the TOC reader",
+                    self.drive_path(index)
+                ));
+            }
+        }
     }
 
     fn start_lookup(&self, index: usize) {
@@ -758,9 +806,13 @@ impl AppState {
             drive.meta_gen
         };
         self.drive_changed(index);
-        let tx = self.meta_tx.clone();
+        let tx = self
+            .meta_tx
+            .lock()
+            .expect("meta sender lock poisoned")
+            .clone();
         let disc_for_thread = disc.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name(format!("rend-web-lookup-{index}"))
             .spawn(move || {
                 let result = lookup_candidates(&disc_for_thread).map_err(|e| e.to_string());
@@ -772,7 +824,28 @@ impl AppState {
                 })
                 .ok();
             })
-            .ok();
+            .is_ok();
+        if !spawned {
+            let stale = {
+                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                match drives.get_mut(index) {
+                    Some(drive) if drive.meta_gen == id => {
+                        drive.lookup_status =
+                            "lookup failed: could not start the lookup".to_string();
+                        false
+                    }
+                    Some(_) => true,
+                    None => true,
+                }
+            };
+            if !stale {
+                self.drive_changed(index);
+                self.emit_log(format!(
+                    "{}: could not start the lookup",
+                    self.drive_path(index)
+                ));
+            }
+        }
     }
 
     fn fetch_cover(&self, index: usize, release_id: String) {
@@ -812,8 +885,12 @@ impl AppState {
         let Some(id) = fetch_id else {
             return;
         };
-        let tx = self.meta_tx.clone();
-        std::thread::Builder::new()
+        let tx = self
+            .meta_tx
+            .lock()
+            .expect("meta sender lock poisoned")
+            .clone();
+        let spawned = std::thread::Builder::new()
             .name(format!("rend-web-cover-{index}"))
             .spawn(move || {
                 let result = cover_art(&release_id).map_err(|e| e.to_string());
@@ -825,7 +902,27 @@ impl AppState {
                 })
                 .ok();
             })
-            .ok();
+            .is_ok();
+        if !spawned {
+            let stale = {
+                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                match drives.get_mut(index) {
+                    Some(drive) if drive.meta_gen == id => {
+                        drive.cover_fetching = false;
+                        false
+                    }
+                    Some(_) => true,
+                    None => true,
+                }
+            };
+            if !stale {
+                self.drive_changed(index);
+                self.emit_log(format!(
+                    "{}: could not start the cover fetch",
+                    self.drive_path(index)
+                ));
+            }
+        }
     }
 
     fn apply_candidates(
@@ -882,6 +979,10 @@ impl AppState {
     }
 
     fn poll_drive(&self, index: usize) {
+        if self.reap_dead_rip(index) {
+            // A dead rip was cleaned up this tick; refresh on the next.
+            return;
+        }
         let path = {
             let drives = self.drives.lock().expect("drives lock poisoned");
             let Some(drive) = drives.get(index) else {
@@ -923,6 +1024,43 @@ impl AppState {
         if need_load {
             self.request_toc(index);
         }
+    }
+
+    /// Reaps a rip whose forwarder thread died while the rip was still
+    /// active, which would otherwise leave the slot active forever. The
+    /// worker is told to stop and both handles are joined outside the
+    /// drive lock.
+    fn reap_dead_rip(&self, index: usize) -> bool {
+        let reaped = {
+            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let Some(drive) = drives.get_mut(index) else {
+                return false;
+            };
+            let Some(rip) = drive.rip.as_mut().filter(|rip| rip.active) else {
+                return false;
+            };
+            if !rip
+                .forwarder
+                .as_ref()
+                .is_some_and(|forwarder| forwarder.is_finished())
+            {
+                return false;
+            }
+            rip.stop.store(true, Ordering::Relaxed);
+            rip.active = false;
+            rip.summary = Some(format!("rip for {} died unexpectedly", drive.path));
+            (drive.path.clone(), rip.worker.take(), rip.forwarder.take())
+        };
+        let (path, worker, forwarder) = reaped;
+        if let Some(forwarder) = forwarder {
+            forwarder.join().ok();
+        }
+        if let Some(worker) = worker {
+            worker.join().ok();
+        }
+        self.emit_log(format!("{path}: the rip forwarder died unexpectedly"));
+        self.drive_changed(index);
+        true
     }
 
     fn handle_meta(&self, event: MetaEvent) {
@@ -1786,6 +1924,59 @@ mod tests {
             assert_eq!(drive.last_status, Some(status));
             assert!(drive.toc.is_some(), "{status:?} must not clear the disc");
         }
+    }
+
+    #[test]
+    fn restart_rearms_the_meta_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        state.start();
+        state.shutdown();
+        assert!(state.meta_rx.lock().unwrap().is_none());
+
+        state.arm_meta();
+        assert!(state.meta_rx.lock().unwrap().is_some());
+
+        state.start();
+        state.shutdown();
+    }
+
+    #[test]
+    fn a_dead_rip_forwarder_is_reaped_on_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+        {
+            let forwarder = std::thread::spawn(|| ());
+            while !forwarder.is_finished() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let mut drives = state.drives.lock().unwrap();
+            let drive = drives.first_mut().unwrap();
+            drive.rip = Some(RipControl {
+                active: true,
+                stopped: false,
+                tracks: vec![1],
+                out_dir: dir.path().to_path_buf(),
+                format: Format::Wav,
+                force: false,
+                toc: DemoDisc::new().toc,
+                states: vec![RipTrackState {
+                    number: 1,
+                    state: TrackState::Pending,
+                }],
+                summary: None,
+                stop: Arc::new(AtomicBool::new(false)),
+                worker: None,
+                forwarder: Some(forwarder),
+            });
+        }
+        state.poll_drive(0);
+
+        let view = state.view();
+        let rip = view.drives[0].rip.as_ref().unwrap();
+        assert!(!rip.active);
+        assert!(rip.summary.as_deref().unwrap().contains("died"));
     }
 
     #[test]
