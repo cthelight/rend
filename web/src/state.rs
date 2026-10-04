@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -218,16 +218,59 @@ impl AppState {
             tick_handle: Mutex::new(None),
             arc: Mutex::new(None),
         });
-        *state.arc.lock().expect("arc lock poisoned") = Some(state.clone());
+        *state.arc_guard() = Some(state.clone());
         Ok(state)
     }
 
     fn arc(&self) -> Arc<Self> {
-        self.arc
-            .lock()
-            .expect("arc lock poisoned")
+        self.arc_guard()
             .clone()
             .expect("AppState is accessed through Arc")
+    }
+
+    /// Locks a state mutex, recovering the guard if a previous holder
+    /// panicked: the state may be stale, but a wedged lock must not take
+    /// the whole server down with it.
+    fn drives_guard(&self) -> MutexGuard<'_, Vec<Drive>> {
+        self.drives
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn cache_guard(&self) -> MutexGuard<'_, MetaCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn settings_guard(&self) -> MutexGuard<'_, Settings> {
+        self.settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn tick_guard(&self) -> MutexGuard<'_, Option<JoinHandle<()>>> {
+        self.tick_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn arc_guard(&self) -> MutexGuard<'_, Option<Arc<Self>>> {
+        self.arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn meta_tx_guard(&self) -> MutexGuard<'_, mpsc::Sender<MetaEvent>> {
+        self.meta_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn meta_rx_guard(&self) -> MutexGuard<'_, Option<mpsc::Receiver<MetaEvent>>> {
+        self.meta_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Starts the background poll/meta thread.
@@ -245,7 +288,7 @@ impl AppState {
             .name("rend-web".into())
             .spawn(move || state.run())
             .expect("failed to spawn the web state thread");
-        *self.tick_handle.lock().expect("state lock poisoned") = Some(handle);
+        *self.tick_guard() = Some(handle);
     }
 
     /// Gives the meta pipeline a live channel.
@@ -255,14 +298,14 @@ impl AppState {
     /// into the void, so their pending state is dropped and the poll can
     /// retry the read.
     fn arm_meta(&self) {
-        let mut rx = self.meta_rx.lock().expect("meta receiver lock poisoned");
+        let mut rx = self.meta_rx_guard();
         if rx.is_some() {
             return;
         }
         let (tx, new_rx) = mpsc::channel();
-        *self.meta_tx.lock().expect("meta sender lock poisoned") = tx;
+        *self.meta_tx_guard() = tx;
         *rx = Some(new_rx);
-        for drive in self.drives.lock().expect("drives lock poisoned").iter_mut() {
+        for drive in self.drives_guard().iter_mut() {
             drive.loading_toc = false;
             drive.cover_fetching = false;
         }
@@ -276,7 +319,7 @@ impl AppState {
             forwarder: Option<JoinHandle<()>>,
         }
         let (rips, tick) = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let rips: Vec<RipHandles> = drives
                 .iter_mut()
                 .filter_map(|drive| drive.rip.as_mut())
@@ -290,7 +333,7 @@ impl AppState {
                     }
                 })
                 .collect();
-            let tick = self.tick_handle.lock().expect("state lock poisoned").take();
+            let tick = self.tick_guard().take();
             (rips, tick)
         };
         // Join outside the drive lock: the forwarder re-acquires it.
@@ -308,8 +351,8 @@ impl AppState {
     }
 
     pub fn view(&self) -> StateView {
-        let settings = self.settings.lock().expect("settings lock poisoned");
-        let drives = self.drives.lock().expect("drives lock poisoned");
+        let settings = self.settings_guard();
+        let drives = self.drives_guard();
         StateView {
             out_dir: self.out_dir.to_string_lossy().into_owned(),
             ffmpeg: self.ffmpeg,
@@ -329,7 +372,7 @@ impl AppState {
 
     pub fn set_format(&self, format: Format) {
         let changed = {
-            let mut settings = self.settings.lock().expect("settings lock poisoned");
+            let mut settings = self.settings_guard();
             let changed = settings.format != format;
             settings.format = format;
             changed
@@ -341,7 +384,7 @@ impl AppState {
 
     pub fn set_force(&self, force: bool) {
         let changed = {
-            let mut settings = self.settings.lock().expect("settings lock poisoned");
+            let mut settings = self.settings_guard();
             let changed = settings.force != force;
             settings.force = force;
             changed
@@ -357,7 +400,7 @@ impl AppState {
 
     pub fn load_toc(&self, index: usize) -> Result<(), ApiError> {
         let demo = {
-            let drives = self.drives.lock().expect("drives lock poisoned");
+            let drives = self.drives_guard();
             let Some(drive) = drives.get(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -368,7 +411,7 @@ impl AppState {
         };
         if demo {
             let loaded = {
-                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                let mut drives = self.drives_guard();
                 let Some(drive) = drives.get_mut(index) else {
                     return Err(ApiError::not_found("unknown drive"));
                 };
@@ -399,7 +442,7 @@ impl AppState {
 
     pub fn select_match(&self, index: usize, pos: usize) -> Result<(), ApiError> {
         let release_id = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -442,7 +485,7 @@ impl AppState {
         tracks: Vec<(Option<String>, Option<String>)>,
     ) -> Result<(), ApiError> {
         {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -504,11 +547,11 @@ impl AppState {
 
     pub fn rip(&self, index: usize, requested: Vec<u8>) -> Result<(), ApiError> {
         let (format, force, template) = {
-            let settings = self.settings.lock().expect("settings lock poisoned");
+            let settings = self.settings_guard();
             (settings.format, settings.force, settings.template.clone())
         };
         let (path, demo, toc, tracks, out_dir, meta, cover, mcn) = {
-            let drives = self.drives.lock().expect("drives lock poisoned");
+            let drives = self.drives_guard();
             let Some(drive) = drives.get(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -581,7 +624,7 @@ impl AppState {
         // Reserve the rip slot before the (blocking) device open, so two
         // concurrent requests cannot both start a rip on this drive.
         {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -630,7 +673,7 @@ impl AppState {
         };
         let worker = spawn(job, worker_tx);
         {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             if let Some(rip) = drives.get_mut(index).and_then(|d| d.rip.as_mut()) {
                 rip.worker = Some(worker);
             }
@@ -643,7 +686,7 @@ impl AppState {
             .spawn(move || state.forward_rip(index, rip_path, worker_rx))
             .expect("failed to spawn the rip forwarder");
         {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             if let Some(rip) = drives.get_mut(index).and_then(|d| d.rip.as_mut()) {
                 rip.forwarder = Some(forwarder);
             }
@@ -658,7 +701,7 @@ impl AppState {
     /// Clears a reserved rip slot after a setup failure, such as the device
     /// not opening.
     fn clear_rip(&self, index: usize) {
-        let mut drives = self.drives.lock().expect("drives lock poisoned");
+        let mut drives = self.drives_guard();
         if let Some(drive) = drives.get_mut(index) {
             drive.rip = None;
         }
@@ -666,7 +709,7 @@ impl AppState {
 
     pub fn stop_rip(&self, index: usize) -> Result<(), ApiError> {
         let stop = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -683,7 +726,7 @@ impl AppState {
 
     pub fn eject(&self, index: usize) -> Result<(), ApiError> {
         let path = {
-            let drives = self.drives.lock().expect("drives lock poisoned");
+            let drives = self.drives_guard();
             let Some(drive) = drives.get(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -698,7 +741,7 @@ impl AppState {
         let device = Device::open(&path).map_err(|e| ApiError::bad(e.to_string()))?;
         device.eject().map_err(|e| ApiError::bad(e.to_string()))?;
         {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return Err(ApiError::not_found("unknown drive"));
             };
@@ -714,7 +757,7 @@ impl AppState {
 
     fn request_toc(&self, index: usize) {
         let (path, id) = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return;
             };
@@ -728,11 +771,7 @@ impl AppState {
             (drive.path.clone(), drive.meta_gen)
         };
         self.drive_changed(index);
-        let tx = self
-            .meta_tx
-            .lock()
-            .expect("meta sender lock poisoned")
-            .clone();
+        let tx = self.meta_tx_guard().clone();
         let spawned = std::thread::Builder::new()
             .name(format!("rend-web-toc-{index}"))
             .spawn(move || {
@@ -747,7 +786,7 @@ impl AppState {
             .is_ok();
         if !spawned {
             let stale = {
-                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                let mut drives = self.drives_guard();
                 match drives.get_mut(index) {
                     Some(drive) if drive.meta_gen == id => {
                         drive.loading_toc = false;
@@ -772,7 +811,7 @@ impl AppState {
 
     fn start_lookup(&self, index: usize) {
         let (disc, cached) = {
-            let drives = self.drives.lock().expect("drives lock poisoned");
+            let drives = self.drives_guard();
             let Some(drive) = drives.get(index) else {
                 return;
             };
@@ -781,9 +820,7 @@ impl AppState {
             };
             let disc = disc_toc(toc);
             let cached = self
-                .cache
-                .lock()
-                .expect("cache lock poisoned")
+                .cache_guard()
                 .candidates(&disc)
                 .map(|candidates| candidates.to_vec());
             (disc, cached)
@@ -794,7 +831,7 @@ impl AppState {
         }
 
         let id = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return;
             };
@@ -806,11 +843,7 @@ impl AppState {
             drive.meta_gen
         };
         self.drive_changed(index);
-        let tx = self
-            .meta_tx
-            .lock()
-            .expect("meta sender lock poisoned")
-            .clone();
+        let tx = self.meta_tx_guard().clone();
         let disc_for_thread = disc.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("rend-web-lookup-{index}"))
@@ -827,7 +860,7 @@ impl AppState {
             .is_ok();
         if !spawned {
             let stale = {
-                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                let mut drives = self.drives_guard();
                 match drives.get_mut(index) {
                     Some(drive) if drive.meta_gen == id => {
                         drive.lookup_status =
@@ -853,7 +886,7 @@ impl AppState {
             return;
         }
         let fetch_id = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return;
             };
@@ -864,12 +897,7 @@ impl AppState {
             } else if drive.cover_fetching {
                 None
             } else {
-                let cached = self
-                    .cache
-                    .lock()
-                    .expect("cache lock poisoned")
-                    .cover(&release_id)
-                    .cloned();
+                let cached = self.cache_guard().cover(&release_id).cloned();
                 if let Some(cover) = cached {
                     drive.set_cover(cover);
                     drive.cover_fetching = false;
@@ -885,11 +913,7 @@ impl AppState {
         let Some(id) = fetch_id else {
             return;
         };
-        let tx = self
-            .meta_tx
-            .lock()
-            .expect("meta sender lock poisoned")
-            .clone();
+        let tx = self.meta_tx_guard().clone();
         let spawned = std::thread::Builder::new()
             .name(format!("rend-web-cover-{index}"))
             .spawn(move || {
@@ -905,7 +929,7 @@ impl AppState {
             .is_ok();
         if !spawned {
             let stale = {
-                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                let mut drives = self.drives_guard();
                 match drives.get_mut(index) {
                     Some(drive) if drive.meta_gen == id => {
                         drive.cover_fetching = false;
@@ -933,7 +957,7 @@ impl AppState {
         candidates: Vec<Candidate>,
     ) {
         let release_id = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return;
             };
@@ -945,7 +969,7 @@ impl AppState {
             {
                 return;
             }
-            let mut cache = self.cache.lock().expect("cache lock poisoned");
+            let mut cache = self.cache_guard();
             cache.insert(disc, candidates.clone());
             drive.candidates = candidates;
             drive.match_sel = 0;
@@ -984,7 +1008,7 @@ impl AppState {
             return;
         }
         let path = {
-            let drives = self.drives.lock().expect("drives lock poisoned");
+            let drives = self.drives_guard();
             let Some(drive) = drives.get(index) else {
                 return;
             };
@@ -1001,7 +1025,7 @@ impl AppState {
         // unreadable drive cannot stall the view and the action handlers.
         let info = read_drive_info(&path);
         let (changed, need_load) = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return;
             };
@@ -1032,7 +1056,7 @@ impl AppState {
     /// drive lock.
     fn reap_dead_rip(&self, index: usize) -> bool {
         let reaped = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let Some(drive) = drives.get_mut(index) else {
                 return false;
             };
@@ -1067,7 +1091,7 @@ impl AppState {
         match event {
             MetaEvent::TocRead { drive, id, result } => {
                 let loaded = {
-                    let mut drives = self.drives.lock().expect("drives lock poisoned");
+                    let mut drives = self.drives_guard();
                     let Some(d) = drives.get_mut(drive) else {
                         return;
                     };
@@ -1110,7 +1134,7 @@ impl AppState {
                 Ok(candidates) => self.apply_candidates(drive, Some(id), disc, candidates),
                 Err(error) => {
                     let stale = {
-                        let mut drives = self.drives.lock().expect("drives lock poisoned");
+                        let mut drives = self.drives_guard();
                         match drives.get_mut(drive) {
                             Some(d) if d.meta_gen == id => {
                                 d.lookup_status = format!("lookup failed: {error}");
@@ -1139,7 +1163,7 @@ impl AppState {
                     Ok(cover) => cover,
                     Err(error) => {
                         let stale = {
-                            let mut drives = self.drives.lock().expect("drives lock poisoned");
+                            let mut drives = self.drives_guard();
                             match drives.get_mut(drive) {
                                 Some(d) if d.meta_gen == id => {
                                     d.cover_fetching = false;
@@ -1160,14 +1184,14 @@ impl AppState {
                     }
                 };
                 let applied = {
-                    let mut drives = self.drives.lock().expect("drives lock poisoned");
+                    let mut drives = self.drives_guard();
                     let Some(d) = drives.get_mut(drive) else {
                         return;
                     };
                     if d.meta_gen != id {
                         return;
                     }
-                    let mut cache = self.cache.lock().expect("cache lock poisoned");
+                    let mut cache = self.cache_guard();
                     cache.cover_insert(release_id, cover.clone());
                     d.set_cover(cover);
                     d.cover_fetching = false;
@@ -1187,7 +1211,7 @@ impl AppState {
                 finished = true;
             }
             {
-                let mut drives = self.drives.lock().expect("drives lock poisoned");
+                let mut drives = self.drives_guard();
                 if let Some(rip) = drives.get_mut(index).and_then(|d| d.rip.as_mut()) {
                     rip.apply_event(&event);
                 }
@@ -1202,7 +1226,7 @@ impl AppState {
             }
             if finished {
                 let worker = {
-                    let mut drives = self.drives.lock().expect("drives lock poisoned");
+                    let mut drives = self.drives_guard();
                     drives
                         .get_mut(index)
                         .and_then(|d| d.rip.as_mut())
@@ -1218,7 +1242,7 @@ impl AppState {
         // The worker ended without reporting completion (for example, it
         // panicked): clear the stuck rip slot so the drive is usable again.
         let died = {
-            let mut drives = self.drives.lock().expect("drives lock poisoned");
+            let mut drives = self.drives_guard();
             let mut died = false;
             if let Some(rip) = drives
                 .get_mut(index)
@@ -1239,7 +1263,7 @@ impl AppState {
 
     fn drive_changed(&self, index: usize) {
         let drive = {
-            let drives = self.drives.lock().expect("drives lock poisoned");
+            let drives = self.drives_guard();
             drives.get(index).map(|drive| drive.view(index))
         };
         if let Some(drive) = drive {
@@ -1250,9 +1274,8 @@ impl AppState {
     }
 
     fn drive_path(&self, index: usize) -> String {
-        self.drives
-            .lock()
-            .expect("drives lock poisoned")
+        let drives = self.drives_guard();
+        drives
             .get(index)
             .map(|drive| drive.path.clone())
             .unwrap_or_else(|| format!("drive {index}"))
@@ -1267,12 +1290,7 @@ impl AppState {
     }
 
     fn run(&self) {
-        let Some(rx) = self
-            .meta_rx
-            .lock()
-            .expect("meta receiver lock poisoned")
-            .take()
-        else {
+        let Some(rx) = self.meta_rx_guard().take() else {
             return;
         };
         let mut last_poll = Instant::now();
@@ -1281,7 +1299,7 @@ impl AppState {
                 break;
             }
             if last_poll.elapsed() >= Duration::from_secs(1) {
-                let count = self.drives.lock().expect("drives lock poisoned").len();
+                let count = self.drives_guard().len();
                 for index in 0..count {
                     self.poll_drive(index);
                 }
