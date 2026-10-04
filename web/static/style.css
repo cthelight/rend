@@ -179,8 +179,7 @@ th {
 }
 
 .tags h3,
-.rip h3,
-.meta h3 {
+.rip h3 {
   margin: 0;
   font-size: 1rem;
 }

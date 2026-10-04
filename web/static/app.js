@@ -1,6 +1,11 @@
 let state = null;
 let settingsKey = "";
 const cards = new Map();
+// Card indices with a request in flight; their action buttons are disabled.
+const pending = new Set();
+// Monotonically increasing; only the newest snapshot may be applied, so an
+// out-of-order response can never restore a stale view.
+let snapshotSeq = 0;
 
 function $(selector) {
   return document.querySelector(selector);
@@ -20,9 +25,15 @@ async function post(path, body) {
 }
 
 async function refresh() {
+  const seq = ++snapshotSeq;
   const response = await fetch("/api/state");
   if (!response.ok) throw new Error(response.statusText);
-  state = await response.json();
+  applySnapshot(seq, await response.json());
+}
+
+function applySnapshot(seq, snapshot) {
+  if (seq !== snapshotSeq) return;
+  state = snapshot;
   render();
 }
 
@@ -49,6 +60,19 @@ function duration(secs) {
   const minutes = Math.floor(secs / 60);
   const seconds = secs % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function humanBytes(bytes) {
+  if (bytes == null) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let value = bytes / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return `${value.toFixed(1)} ${units[i]}`;
 }
 
 function progress(trackState) {
@@ -85,9 +109,9 @@ function renderSettings() {
 
   $("#format").addEventListener("change", async (event) => {
     const previous = state.format;
+    const seq = ++snapshotSeq;
     try {
-      state = await post("/api/settings", { format: event.target.value });
-      render();
+      applySnapshot(seq, await post("/api/settings", { format: event.target.value }));
     } catch (error) {
       addLog(error.message);
       event.target.value = previous;
@@ -96,9 +120,9 @@ function renderSettings() {
 
   $("#force").addEventListener("change", async (event) => {
     const previous = state.force;
+    const seq = ++snapshotSeq;
     try {
-      state = await post("/api/settings", { force: event.target.checked });
-      render();
+      applySnapshot(seq, await post("/api/settings", { force: event.target.checked }));
     } catch (error) {
       addLog(error.message);
       event.target.checked = previous;
@@ -189,8 +213,19 @@ function updateTocSlot(record, drive, active) {
   }
 }
 
-function updateMetaSlot(card, drive) {
-  card.querySelector(".meta-slot").innerHTML = `
+function updateMetaSlot(record, drive) {
+  // Rebuilding here re-assigns the cover's data URL, making the browser
+  // re-decode it; skip the rebuild when none of the inputs changed.
+  const metaKey = [
+    drive.lookupStatus,
+    drive.mcn || "",
+    drive.registerUrl || "",
+    drive.coverFetching,
+  ].join("\u0000");
+  if (metaKey === record.metaKey && drive.cover === record.metaCover) return;
+  record.metaKey = metaKey;
+  record.metaCover = drive.cover;
+  record.card.querySelector(".meta-slot").innerHTML = `
     <div class="meta">
       <div>
         ${escapeHtml(drive.lookupStatus)}
@@ -353,14 +388,15 @@ function updateCard(record, drive) {
   card.querySelector(".drive-path").textContent = `${drive.path}${
     drive.demo ? " (demo)" : ""
   }`;
+  const busy = active || pending.has(drive.index);
   card.querySelector('[data-action="load"]').disabled =
-    active || drive.demo || !drive.disc;
-  card.querySelector('[data-action="rip"]').disabled = active || !drive.toc;
+    busy || drive.demo || !drive.disc;
+  card.querySelector('[data-action="rip"]').disabled = busy || !drive.toc;
   card.querySelector('[data-action="stop"]').disabled = !active;
-  card.querySelector('[data-action="eject"]').disabled = active || drive.demo;
+  card.querySelector('[data-action="eject"]').disabled = busy || drive.demo;
 
   updateTocSlot(record, drive, active);
-  updateMetaSlot(card, drive);
+  updateMetaSlot(record, drive);
   updateMatchesSlot(card, drive, active);
   updateTagsSlot(record, drive, active);
   updateRipSlot(record, drive);
@@ -387,7 +423,7 @@ function applyRipEvent(driveId, event) {
       break;
     case "trackDone":
       track.status = "done";
-      track.detail = `${event.bytes} B`;
+      track.detail = humanBytes(event.bytes);
       break;
     case "trackFailed":
       track.status = "failed";
@@ -425,6 +461,8 @@ function render() {
         card: buildCard(drive),
         checked: new Set(),
         tocKey: null,
+        metaKey: null,
+        metaCover: null,
         formKey: null,
         ripRows: null,
       };
@@ -448,22 +486,35 @@ function bindDelegated() {
     if (actionButton) {
       const card = actionButton.closest(".drive");
       const index = Number(card.dataset.index);
+      if (pending.has(index)) return;
       const action = actionButton.dataset.action;
+      pending.add(index);
       try {
         if (action === "load") {
-          await post(`/api/drives/${index}/load`);
+          const seq = ++snapshotSeq;
+          applySnapshot(seq, await post(`/api/drives/${index}/load`));
         } else if (action === "rip") {
           const tracks = [...card.querySelectorAll('input[data-track]:checked')].map(
             (input) => Number(input.dataset.track)
           );
-          await post(`/api/drives/${index}/rip`, { tracks });
+          if (!tracks.length) {
+            addLog("select at least one track to rip");
+            return;
+          }
+          const seq = ++snapshotSeq;
+          applySnapshot(seq, await post(`/api/drives/${index}/rip`, { tracks }));
         } else if (action === "stop") {
-          await post(`/api/drives/${index}/stop`);
+          const seq = ++snapshotSeq;
+          applySnapshot(seq, await post(`/api/drives/${index}/stop`));
         } else if (action === "eject") {
-          await post(`/api/drives/${index}/eject`);
+          const seq = ++snapshotSeq;
+          applySnapshot(seq, await post(`/api/drives/${index}/eject`));
         }
       } catch (error) {
         addLog(error.message);
+      } finally {
+        pending.delete(index);
+        render();
       }
       return;
     }
@@ -471,12 +522,21 @@ function bindDelegated() {
     if (matchButton) {
       const card = matchButton.closest(".drive");
       const index = Number(card.dataset.index);
+      if (pending.has(index)) return;
+      pending.add(index);
       try {
-        await post(`/api/drives/${index}/match`, {
-          index: Number(matchButton.dataset.match),
-        });
+        const seq = ++snapshotSeq;
+        applySnapshot(
+          seq,
+          await post(`/api/drives/${index}/match`, {
+            index: Number(matchButton.dataset.match),
+          })
+        );
       } catch (error) {
         addLog(error.message);
+      } finally {
+        pending.delete(index);
+        render();
       }
     }
   });
@@ -498,25 +558,34 @@ function bindDelegated() {
     event.preventDefault();
     const card = form.closest(".drive");
     const index = Number(card.dataset.index);
+    if (pending.has(index)) return;
     const data = new FormData(form);
     const trackCount = form.querySelectorAll('input[name^="title-"]').length;
     const tracks = [];
     for (let i = 0; i < trackCount; i += 1) {
       tracks.push({
-        title: data.get(`title-${i}`) ?? null,
-        artist: data.get(`artist-${i}`) ?? null,
+        title: data.get(`title-${i}`),
+        artist: data.get(`artist-${i}`),
       });
     }
+    pending.add(index);
     try {
-      await post(`/api/drives/${index}/tags`, {
-        artist: data.get("artist") ?? null,
-        album: data.get("album") ?? null,
-        albumArtist: data.get("albumArtist") ?? null,
-        year: data.get("year") ?? null,
-        tracks,
-      });
+      const seq = ++snapshotSeq;
+      applySnapshot(
+        seq,
+        await post(`/api/drives/${index}/tags`, {
+          artist: data.get("artist"),
+          album: data.get("album"),
+          albumArtist: data.get("albumArtist"),
+          year: data.get("year"),
+          tracks,
+        })
+      );
     } catch (error) {
       addLog(error.message);
+    } finally {
+      pending.delete(index);
+      render();
     }
   });
 }
@@ -527,14 +596,26 @@ function connect() {
     refresh().catch((error) => addLog(error.message));
   };
   source.onmessage = (message) => {
-    const event = JSON.parse(message.data);
+    let event;
+    try {
+      event = JSON.parse(message.data);
+    } catch {
+      return;
+    }
     if (event.type === "driveChanged") {
       if (!state) {
         refresh().catch((error) => addLog(error.message));
         return;
       }
-      state.drives[event.drive.index] = event.drive;
-      render();
+      // Locate the drive by its logical index (not array position) so a
+      // re- or removal of devices can't shift the wrong card.
+      const slot = state.drives.findIndex((drive) => drive.index === event.drive.index);
+      if (slot === -1) {
+        refresh().catch((error) => addLog(error.message));
+      } else {
+        state.drives[slot] = event.drive;
+        render();
+      }
     } else if (event.type === "rip") {
       applyRipEvent(event.drive, event.event);
       render();
