@@ -1,0 +1,27 @@
+[package]
+name = "rend-web"
+description = "Web UI for rend: a CD ripper server with a built-in frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rend-web"
+path = "src/main.rs"
+
+[dependencies]
+rend-core = { path = "../core" }
+rend-encode = { path = "../encode" }
+rend-meta = { path = "../meta" }
+rend-rip = { path = "../rip" }
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+clap = { workspace = true }
+base64 = { workspace = true }
+rust-embed = { version = "8", features = ["debug-embed"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

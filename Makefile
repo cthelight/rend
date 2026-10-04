@@ -4,13 +4,14 @@ BINDIR ?= $(PREFIX)/bin
 
 BIN     = rend
 TUI_BIN = rend-tui
+WEB_BIN = rend-web
 
 RELEASE_DIR = target/release
 DEBUG_DIR   = target/debug
 
 .DEFAULT_GOAL := all
 
-.PHONY: all debug release install install-cli install-tui uninstall test clippy fmt lint clean help
+.PHONY: all debug release install install-cli install-tui install-web uninstall test clippy fmt lint clean help
 
 all: debug
 
@@ -22,8 +23,8 @@ debug:
 release:
 	$(CARGO) build --release
 
-## Install both binaries into $(BINDIR)
-install: install-cli install-tui
+## Install all binaries into $(BINDIR)
+install: install-cli install-tui install-web
 
 ## Install the release CLI binary into $(BINDIR)
 install-cli: release
@@ -35,9 +36,14 @@ install-tui: release
 	install -d $(BINDIR)
 	install -m 0755 $(RELEASE_DIR)/$(TUI_BIN) $(BINDIR)/$(TUI_BIN)
 
+## Install the release web binary into $(BINDIR)
+install-web: release
+	install -d $(BINDIR)
+	install -m 0755 $(RELEASE_DIR)/$(WEB_BIN) $(BINDIR)/$(WEB_BIN)
+
 ## Remove installed binaries from $(BINDIR)
 uninstall:
-	rm -f $(BINDIR)/$(BIN) $(BINDIR)/$(TUI_BIN)
+	rm -f $(BINDIR)/$(BIN) $(BINDIR)/$(TUI_BIN) $(BINDIR)/$(WEB_BIN)
 
 ## Run the test suite
 test:
@@ -65,12 +71,13 @@ help:
 	@echo "Usage: make [target] [PREFIX=/path]"
 	@echo
 	@echo "Targets:"
-	@echo "  all          Build the debug binary (default)"
-	@echo "  debug        Build the debug binary"
-	@echo "  release      Build the release binary"
-	@echo "  install      Build and install '$(BIN)' and '$(TUI_BIN)' to $(PREFIX)/bin"
+	@echo "  all          Build the debug binaries (default)"
+	@echo "  debug        Build the debug binaries"
+	@echo "  release      Build the release binaries"
+	@echo "  install      Build and install '$(BIN)', '$(TUI_BIN)' and '$(WEB_BIN)' to $(PREFIX)/bin"
 	@echo "  install-cli  Build and install '$(BIN)' to $(PREFIX)/bin"
 	@echo "  install-tui  Build and install '$(TUI_BIN)' to $(PREFIX)/bin"
+	@echo "  install-web  Build and install '$(WEB_BIN)' to $(PREFIX)/bin"
 	@echo "  uninstall    Remove installed binaries from $(PREFIX)/bin"
 	@echo "  test         Run the test suite"
 	@echo "  clippy       Run clippy lints"

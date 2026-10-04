@@ -1,6 +1,7 @@
 # rend
 
-Rip audio CDs from the command line or in an interactive TUI.
+Rip audio CDs from the command line, in an interactive TUI, or through a
+browser UI.
 
 A Rust terminal application built on `rend-core`, a low-level wrapper
 around the Linux `cdrom` ioctl interface.
@@ -17,6 +18,7 @@ around the Linux `cdrom` ioctl interface.
 - `meta/` — `rend-meta`: MusicBrainz disc lookup and tag writing (lofty)
 - `cli/` — `rend`: the command-line interface
 - `tui/` — `rend-tui`: an interactive TUI with mouse support
+- `web/` — `rend-web`: a browser UI with live progress over SSE
 
 ## Usage
 
@@ -178,6 +180,29 @@ with the CLI, multi-drive rips write
 to per-device subdirectories of the output path so track numbers never
 collide.
 
+## Web
+
+`rend-web` serves a single-page browser UI for the same drive, metadata,
+and ripping flows:
+
+```sh
+rend-web                       # use the first CD-ROM device
+rend-web -d /dev/sr1           # use a specific device
+rend-web -o ~/rips -f          # rip to ~/rips, overwriting existing files
+rend-web -F wav                # rip to WAV instead of FLAC
+rend-web -T '<year>/<album>/<number> <title>'   # custom naming template
+rend-web --demo                # simulated disc, no hardware required
+```
+
+Then open the printed URL, normally <http://127.0.0.1:3000/>.
+
+The page lists discovered drives, loads tables of contents, shows
+MusicBrainz candidate matches and cover art, edits disc and track tags,
+and starts or stops rips. Drive state and per-track rip progress are
+pushed over a server-sent events stream, so the page updates without
+polling. As with the TUI, several drives can rip at the same time, and
+multi-drive rips write to per-device subdirectories of the output path.
+
 ## Development
 
 ```sh
@@ -187,8 +212,9 @@ make test       # run the test suite
 make lint       # fmt check and clippy, warnings denied
 ```
 
-`make install` installs both `rend` and `rend-tui` to `~/.local/bin`
-(`make install-cli` or `make install-tui` for just one of them), and
-`make uninstall` removes them. The targets are thin wrappers around
+`make install` installs `rend`, `rend-tui`, and `rend-web` to
+`~/.local/bin` (`make install-cli`, `make install-tui`, or
+`make install-web` for just one of them), and `make uninstall` removes
+them. The targets are thin wrappers around
 `cargo` — override with `CARGO=…` if needed — and `make help` lists
 the full set.
