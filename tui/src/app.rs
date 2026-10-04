@@ -1397,7 +1397,7 @@ impl App {
                             }
                         }
                     }
-                    RipEvent::TrackSkipped { number, reason } => {
+                    RipEvent::TrackSkipped { number, reason, .. } => {
                         if let Some(i) = track_index(&rip.toc, number) {
                             if let Some(slot) = rip.state.states.get_mut(i) {
                                 *slot = TrackState::Skipped(reason);

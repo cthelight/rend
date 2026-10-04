@@ -24,9 +24,13 @@ use rend_encode::Format;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 
 mod app;
-mod demo;
-mod rip;
 mod ui;
+
+// The rip worker and the simulated disc live in rend-rip, shared with the
+// other frontends; import them so the `crate::rip` / `crate::demo` paths
+// keep working.
+use rend_rip as rip;
+use rend_rip::demo;
 
 use app::App;
 

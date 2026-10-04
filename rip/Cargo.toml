@@ -1,0 +1,15 @@
+[package]
+name = "rend-rip"
+description = "The rip worker shared by rend's frontends: read CDDA, encode, tag, report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rend-core = { path = "../core" }
+rend-encode = { path = "../encode" }
+rend-meta = { path = "../meta" }
+
+[dev-dependencies]
+lofty = { workspace = true }
+tempfile = { workspace = true }

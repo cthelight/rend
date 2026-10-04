@@ -20,7 +20,11 @@ pub enum RipEvent {
     /// A track started being read.
     TrackStarted { number: u8 },
     /// A track was skipped (e.g. its output file exists and force is off).
-    TrackSkipped { number: u8, reason: String },
+    TrackSkipped {
+        number: u8,
+        reason: String,
+        path: PathBuf,
+    },
     /// A track produced more data.
     Progress {
         number: u8,
@@ -183,6 +187,7 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
         tx.send(RipEvent::TrackSkipped {
             number,
             reason: "output exists (force is off)".into(),
+            path: spec.path.clone(),
         })
         .ok();
         return Ok(());

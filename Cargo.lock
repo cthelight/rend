@@ -1027,6 +1027,7 @@ dependencies = [
  "rend-core",
  "rend-encode",
  "rend-meta",
+ "rend-rip",
  "tempfile",
  "thiserror",
 ]
@@ -1062,6 +1063,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rend-rip"
+version = "0.1.0"
+dependencies = [
+ "lofty",
+ "rend-core",
+ "rend-encode",
+ "rend-meta",
+ "tempfile",
+]
+
+[[package]]
 name = "rend-tui"
 version = "0.1.0"
 dependencies = [
@@ -1072,6 +1084,7 @@ dependencies = [
  "rend-core",
  "rend-encode",
  "rend-meta",
+ "rend-rip",
  "tempfile",
 ]
 

@@ -9,6 +9,7 @@ rust-version.workspace = true
 rend-core = { path = "../core" }
 rend-encode = { path = "../encode" }
 rend-meta = { path = "../meta" }
+rend-rip = { path = "../rip" }
 clap = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
