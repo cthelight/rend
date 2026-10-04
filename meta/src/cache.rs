@@ -8,16 +8,31 @@
 //! cached, so a later retry can still reach the network. An empty
 //! candidate list is cached — "no release matched" is a definitive
 //! answer, not a failure.
+//!
+//! Each table is bounded. When it is full, the oldest entry is evicted to
+//! make room; re-recording an existing key refreshes it, moving it to the
+//! front. A long-running session therefore never grows without limit, and
+//! the discs a user keeps coming back to stay cached.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::lookup::{Candidate, DiscToc};
+
+/// How many distinct disc layouts may be remembered.
+const MAX_CANDIDATES: usize = 256;
+
+/// How many distinct covers may be remembered.
+const MAX_COVERS: usize = 64;
 
 /// Lookups and covers this session has already fetched.
 #[derive(Debug, Default)]
 pub struct MetaCache {
     candidates: HashMap<DiscToc, Vec<Candidate>>,
+    /// Insertion order of `candidates`, oldest first, for eviction.
+    candidate_order: VecDeque<DiscToc>,
     covers: HashMap<String, Option<Vec<u8>>>,
+    /// Insertion order of `covers`, oldest first, for eviction.
+    cover_order: VecDeque<String>,
 }
 
 impl MetaCache {
@@ -32,8 +47,18 @@ impl MetaCache {
     }
 
     /// Records the candidates for `toc`, best first. An empty list is
-    /// recorded too: "no match" needs no refetch.
+    /// recorded too: "no match" needs no refetch. Re-recording a known
+    /// disc refreshes it; when the table is full the oldest disc is
+    /// evicted to make room.
     pub fn insert(&mut self, toc: DiscToc, candidates: Vec<Candidate>) {
+        if self.candidates.contains_key(&toc) {
+            self.candidate_order.retain(|t| t != &toc);
+        } else if self.candidate_order.len() >= MAX_CANDIDATES {
+            if let Some(oldest) = self.candidate_order.pop_front() {
+                self.candidates.remove(&oldest);
+            }
+        }
+        self.candidate_order.push_back(toc.clone());
         self.candidates.insert(toc, candidates);
     }
 
@@ -44,8 +69,18 @@ impl MetaCache {
     }
 
     /// Records the cover for `release_id`, `None` included: a release
-    /// without a cover needs no refetch either.
+    /// without a cover needs no refetch either. Re-recording a known
+    /// release refreshes it; when the table is full the oldest release is
+    /// evicted to make room.
     pub fn cover_insert(&mut self, release_id: String, cover: Option<Vec<u8>>) {
+        if self.covers.contains_key(&release_id) {
+            self.cover_order.retain(|id| id != &release_id);
+        } else if self.cover_order.len() >= MAX_COVERS {
+            if let Some(oldest) = self.cover_order.pop_front() {
+                self.covers.remove(&oldest);
+            }
+        }
+        self.cover_order.push_back(release_id.clone());
         self.covers.insert(release_id, cover);
     }
 
@@ -141,5 +176,64 @@ mod tests {
         assert_eq!(cache.cover("rel-2"), Some(&None));
 
         assert!(cache.cover("rel-3").is_none());
+    }
+
+    fn toc_at(i: u32) -> DiscToc {
+        DiscToc {
+            offsets: vec![150, 1650, i],
+            leadout: 3300 + i,
+        }
+    }
+
+    #[test]
+    fn the_oldest_disc_is_evicted_when_the_cache_is_full() {
+        let mut cache = MetaCache::new();
+        for i in 0..MAX_CANDIDATES as u32 {
+            cache.insert(toc_at(i), vec![candidate("rel-1")]);
+        }
+        assert_eq!(cache.len(), MAX_CANDIDATES);
+        assert!(cache.candidates(&toc_at(0)).is_some());
+
+        // One more disc pushes the oldest (index 0) out.
+        cache.insert(toc_at(999), vec![candidate("rel-1")]);
+        assert_eq!(cache.len(), MAX_CANDIDATES);
+        assert!(cache.candidates(&toc_at(0)).is_none());
+        assert!(cache.candidates(&toc_at(1)).is_some());
+        assert!(cache.candidates(&toc_at(999)).is_some());
+    }
+
+    #[test]
+    fn a_rerecorded_disc_moves_to_the_front() {
+        let mut cache = MetaCache::new();
+        for i in 0..MAX_CANDIDATES as u32 {
+            cache.insert(toc_at(i), vec![candidate("rel-1")]);
+        }
+
+        // Touching disc 0 makes it the most recent, so evicting now drops
+        // disc 1 instead.
+        cache.insert(toc_at(0), vec![candidate("rel-2")]);
+        cache.insert(toc_at(999), vec![candidate("rel-1")]);
+
+        assert!(cache.candidates(&toc_at(0)).is_some());
+        assert!(cache.candidates(&toc_at(1)).is_none());
+        assert_eq!(
+            cache.candidates(&toc_at(0)).unwrap()[0].meta.release_id,
+            "rel-2"
+        );
+    }
+
+    #[test]
+    fn the_oldest_cover_is_evicted_when_the_cache_is_full() {
+        let mut cache = MetaCache::new();
+        for i in 0..MAX_COVERS {
+            cache.cover_insert(format!("rel-{i}"), Some(vec![i as u8]));
+        }
+        assert_eq!(cache.cover("rel-0"), Some(&Some(vec![0u8])));
+
+        // One more release pushes the oldest (rel-0) out.
+        cache.cover_insert("rel-new".into(), Some(vec![255]));
+        assert!(cache.cover("rel-0").is_none());
+        assert_eq!(cache.cover("rel-1"), Some(&Some(vec![1u8])));
+        assert_eq!(cache.cover("rel-new"), Some(&Some(vec![255u8])));
     }
 }
