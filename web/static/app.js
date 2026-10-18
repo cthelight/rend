@@ -10,6 +10,13 @@ const pending = new Set();
 // out-of-order response can never restore a stale view.
 let snapshotSeq = 0;
 
+const DISC_SVG = `<svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+  <circle cx="32" cy="32" r="29" stroke="currentColor" stroke-width="2.5"/>
+  <circle cx="32" cy="32" r="9" stroke="currentColor" stroke-width="2.5"/>
+  <circle cx="32" cy="32" r="2.5" fill="currentColor"/>
+  <path d="M11 41a24 24 0 0 1-1-17" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+</svg>`;
+
 function $(selector) {
   return document.querySelector(selector);
 }
@@ -40,9 +47,24 @@ function applySnapshot(seq, snapshot) {
   render();
 }
 
+function timeStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function addLog(message) {
   const item = document.createElement("li");
-  item.textContent = message;
+  const time = document.createElement("span");
+  time.className = "log-time";
+  time.textContent = timeStamp();
+  const msg = document.createElement("span");
+  msg.className = "log-msg";
+  msg.textContent = message;
+  item.append(time, msg);
+  if (/(failed|error|died|not found|denied)/i.test(message)) {
+    item.classList.add("log--err");
+  }
   const list = $("#log-list");
   list.prepend(item);
   while (list.children.length > 100) list.lastChild.remove();
@@ -109,37 +131,66 @@ function ripProgress(rip) {
   return { finished, units, fraction: units ? done / units : 0 };
 }
 
+function drivePill(status) {
+  switch (status) {
+    case "disc present":
+      return "pill--ok";
+    case "tray open":
+      return "pill--warn";
+    case "not ready":
+      return "pill--warn";
+    case "unreadable":
+      return "pill--err";
+    default:
+      return "pill--muted";
+  }
+}
+
+function lookupPill(status) {
+  if (/…$/.test(status)) return "pill--busy";
+  if (/failed/i.test(status)) return "pill--err";
+  if (/no match/i.test(status)) return "pill--warn";
+  if (/^found$|^loaded$|^demo disc$/i.test(status)) return "pill--ok";
+  if (/match \d+ of \d+/i.test(status)) return "pill--info";
+  if (/manual/i.test(status)) return "pill--warn";
+  return "pill--muted";
+}
+
+function statePill(status) {
+  switch (status) {
+    case "ripping":
+      return "busy";
+    case "done":
+      return "ok";
+    case "failed":
+      return "err";
+    default:
+      return "muted";
+  }
+}
+
 function renderSettings() {
-  const key = `${state.format}:${state.force}`;
+  const key = `${state.format}:${state.force}:${state.outDir}`;
   if (settingsKey === key) return;
   settingsKey = key;
 
   const settings = $("#settings");
   settings.innerHTML = `
-    <label>
-      format
-      <select id="format">
-        <option value="flac" ${state.format === "flac" ? "selected" : ""}>flac</option>
-        <option value="wav" ${state.format === "wav" ? "selected" : ""}>wav</option>
-      </select>
-    </label>
-    <label>
+    <span class="chip" title="output directory">
+      <span>out</span>
+      <span class="chip-text">${escapeHtml(state.outDir)}</span>
+    </span>
+    <div class="seg" role="group" aria-label="output format">
+      <button type="button" class="seg-btn ${state.format === "flac" ? "active" : ""}" data-format="flac">flac</button>
+      <button type="button" class="seg-btn ${state.format === "wav" ? "active" : ""}" data-format="wav">wav</button>
+    </div>
+    <label class="switch" title="overwrite existing files">
       <input type="checkbox" id="force" ${state.force ? "checked" : ""}>
-      force
+      <span class="switch-track" aria-hidden="true"></span>
+      <span>force</span>
     </label>
-    ${state.ffmpeg ? "" : '<span class="warn">ffmpeg not found; flac output is unavailable</span>'}
+    ${state.ffmpeg ? "" : '<span class="chip chip--warn">ffmpeg not found — flac unavailable</span>'}
   `;
-
-  $("#format").addEventListener("change", async (event) => {
-    const previous = state.format;
-    const seq = ++snapshotSeq;
-    try {
-      applySnapshot(seq, await post("/api/settings", { format: event.target.value }));
-    } catch (error) {
-      addLog(error.message);
-      event.target.value = previous;
-    }
-  });
 
   $("#force").addEventListener("change", async (event) => {
     const previous = state.force;
@@ -158,75 +209,81 @@ function buildCard(drive) {
   card.className = "drive";
   card.dataset.index = drive.index;
   card.innerHTML = `
-    <header>
-      <h2 class="drive-label"></h2>
-      <span class="status drive-status"></span>
+    <header class="drive-head">
+      <div class="drive-id">
+        <h2 class="drive-label"></h2>
+        <div class="drive-status"></div>
+        <div class="path drive-path"></div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn" data-action="load">Read TOC</button>
+        <button type="button" class="btn" data-action="eject">Eject</button>
+        <button type="button" class="btn btn--danger" data-action="stop" disabled>Stop</button>
+        <button type="button" class="btn btn--primary" data-action="rip">Rip selected</button>
+      </div>
     </header>
-    <div class="path drive-path"></div>
-    <div class="actions">
-      <button data-action="load">Read TOC</button>
-      <button data-action="rip">Rip selected</button>
-      <button data-action="stop" disabled>Stop</button>
-      <button data-action="eject">Eject</button>
+    <div class="drive-body">
+      <aside class="disc">
+        <div class="meta-slot"></div>
+        <div class="matches-slot"></div>
+      </aside>
+      <div class="tracks">
+        <div class="toc-slot"></div>
+        <div class="tags-slot"></div>
+        <div class="rip-slot"></div>
+      </div>
     </div>
-    <div class="toc-slot"></div>
-    <div class="meta-slot"></div>
-    <div class="matches-slot"></div>
-    <div class="tags-slot"></div>
-    <div class="rip-slot"></div>
   `;
   return card;
 }
 
-function tocTable(audioTracks, checked, active) {
-  return `<table>
-    <thead>
-      <tr><th></th><th>#</th><th>type</th><th>start</th><th>duration</th></tr>
-    </thead>
-    <tbody>
-      ${audioTracks
-        .map(
-          (track) => `
-        <tr data-track-row="${track.number}">
-          <td>
-            <input
-              type="checkbox"
-              data-track="${track.number}"
-              aria-label="select track ${track.number}"
-              ${checked.has(track.number) ? "checked" : ""}
-              ${active ? "disabled" : ""}
-            >
-          </td>
-          <td>${track.number}</td>
-          <td>${escapeHtml(track.kind)}</td>
-          <td>${escapeHtml(track.startMsf || "")}</td>
-          <td>${duration(track.durationSecs)}</td>
-        </tr>`
-        )
-        .join("")}
-    </tbody>
-  </table>`;
+function tocTable(audioTracks, checked, active, titles) {
+  const all = audioTracks.length > 0 && audioTracks.every((t) => checked.has(t.number));
+  return `
+    <div class="toc">
+      <h3 class="section-title">Tracks</h3>
+      <div class="toc-head">
+        <label class="selectall">
+          <input type="checkbox" data-select-all ${all ? "checked" : ""} ${active ? "disabled" : ""}>
+          <span>Select all</span>
+        </label>
+        <span class="toc-count"></span>
+      </div>
+      <table>
+        <thead>
+          <tr><th class="col-check"></th><th class="col-num">#</th><th>Title</th><th class="col-dur">Time</th></tr>
+        </thead>
+        <tbody>
+          ${audioTracks
+            .map((track, index) => {
+              const title = titles && titles[index] ? titles[index].title : "";
+              return `
+            <tr data-track-row="${track.number}">
+              <td class="col-check">
+                <input
+                  type="checkbox"
+                  data-track="${track.number}"
+                  aria-label="select track ${track.number}"
+                  ${checked.has(track.number) ? "checked" : ""}
+                  ${active ? "disabled" : ""}
+                >
+              </td>
+              <td class="col-num">${track.number}</td>
+              <td class="title">${
+                title
+                  ? escapeHtml(title)
+                  : `<span class="track-fallback">Track ${track.number}</span>`
+              }</td>
+              <td class="col-dur">${duration(track.durationSecs)}</td>
+            </tr>`;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>`;
 }
 
-function updateTocSlot(record, drive, active) {
-  const slot = record.card.querySelector(".toc-slot");
-  const tracks = drive.toc ? drive.toc.tracks : [];
-  const audioTracks = tracks.filter((track) => track.kind === "audio");
-  const tocKey = audioTracks.map((track) => track.number).join(",");
-
-  if (!drive.toc) {
-    record.tocKey = null;
-    slot.innerHTML = '<p class="muted">No disc loaded.</p>';
-    return;
-  }
-  if (record.tocKey !== tocKey) {
-    record.tocKey = tocKey;
-    record.checked = new Set(audioTracks.map((track) => track.number));
-    const shown = active ? new Set(drive.rip.tracks) : record.checked;
-    slot.innerHTML = tocTable(audioTracks, shown, active);
-    return;
-  }
-  const selected = active ? new Set(drive.rip.tracks) : record.checked;
+function syncTocSlot(slot, audioTracks, selected, active) {
   for (const track of audioTracks) {
     const row = slot.querySelector(`[data-track-row="${track.number}"]`);
     if (!row) continue;
@@ -234,37 +291,107 @@ function updateTocSlot(record, drive, active) {
     checkbox.checked = selected.has(track.number);
     checkbox.disabled = active;
   }
+  const selectedCount = audioTracks.filter((track) => selected.has(track.number)).length;
+  const selectAll = slot.querySelector("[data-select-all]");
+  if (selectAll) {
+    selectAll.checked = selectedCount === audioTracks.length && selectedCount > 0;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < audioTracks.length;
+    selectAll.disabled = active;
+  }
+  const count = slot.querySelector(".toc-count");
+  if (count) {
+    count.textContent = `${selectedCount} of ${audioTracks.length} selected`;
+  }
+}
+
+function updateTocSlot(record, drive, active) {
+  const slot = record.card.querySelector(".toc-slot");
+  const tracks = drive.toc ? drive.toc.tracks : [];
+  const audioTracks = tracks.filter((track) => track.kind === "audio");
+  const titles = drive.meta ? drive.meta.tracks : null;
+  const numbersKey = audioTracks.map((track) => track.number).join(",");
+  const titleKey = titles ? titles.map((track) => track.title).join("|") : "";
+
+  if (!drive.toc) {
+    record.tocKey = null;
+    record.tocRenderKey = null;
+    slot.innerHTML = '<div class="slot-empty">No disc loaded.</div>';
+    return;
+  }
+  if (record.tocKey !== numbersKey) {
+    record.tocKey = numbersKey;
+    record.checked = new Set(audioTracks.map((track) => track.number));
+    record.tocRenderKey = null;
+  }
+  const selected = active ? new Set(drive.rip.tracks) : record.checked;
+  const renderKey = `${numbersKey}|${titleKey}`;
+  if (record.tocRenderKey !== renderKey) {
+    record.tocRenderKey = renderKey;
+    slot.innerHTML = tocTable(audioTracks, selected, active, titles);
+  }
+  syncTocSlot(slot, audioTracks, selected, active);
 }
 
 function updateMetaSlot(record, drive) {
   // Rebuilding here re-assigns the cover's data URL, making the browser
   // re-decode it; skip the rebuild when none of the inputs changed.
+  const meta = drive.meta;
   const metaKey = [
     drive.lookupStatus,
     drive.mcn || "",
     drive.registerUrl || "",
     drive.coverFetching,
+    Boolean(drive.toc),
+    meta ? `${meta.artist}\u0000${meta.album}\u0000${meta.year || ""}` : "",
   ].join("\u0000");
   if (metaKey === record.metaKey && drive.cover === record.metaCover) return;
   record.metaKey = metaKey;
   record.metaCover = drive.cover;
+  const album = meta ? meta.album : "";
+  const artist = meta ? meta.artist : "";
+  const year = meta ? meta.year : null;
   record.card.querySelector(".meta-slot").innerHTML = `
-    <div class="meta">
-      <div>
-        ${escapeHtml(drive.lookupStatus)}
-        ${drive.coverFetching ? ' <span class="warn">(fetching cover)</span>' : ""}
-      </div>
-      ${drive.mcn ? `<div>MCN: ${escapeHtml(drive.mcn)}</div>` : ""}
-      ${
-        drive.registerUrl
-          ? `<div><a href="${escapeHtml(drive.registerUrl)}" target="_blank" rel="noopener">register on MusicBrainz</a></div>`
-          : ""
-      }
-      <div class="cover">
-        <img src="${escapeHtml(drive.cover || "")}" alt="" ${
+    <div class="cover">
+      <img src="${escapeHtml(drive.cover || "")}" alt="cover art" ${
     drive.cover ? "" : "hidden"
   }>
-      </div>
+      <div class="cover-fallback" ${drive.cover ? "hidden" : ""}>${DISC_SVG}</div>
+    </div>
+    <div class="disc-title">
+      <h3 class="disc-album">${
+    album
+      ? escapeHtml(album)
+      : drive.toc
+        ? "Unidentified disc"
+        : "No disc loaded"
+  }</h3>
+      <div class="disc-artist">${
+    artist
+      ? `${escapeHtml(artist)}${year ? ` <span class="disc-year">· ${escapeHtml(year)}</span>` : ""}`
+      : ""
+  }</div>
+    </div>
+    <div class="disc-lookup">
+      <span class="pill ${lookupPill(drive.lookupStatus)}"><span class="pill-dot"></span>${escapeHtml(
+        drive.lookupStatus || "idle"
+      )}</span>
+      ${
+    drive.coverFetching
+      ? '<span class="pill pill--muted"><span class="pill-dot"></span>fetching cover</span>'
+      : ""
+  }
+    </div>
+    <div class="disc-extra">
+      ${
+    drive.mcn
+      ? `<div class="mcn"><span>MCN</span><code>${escapeHtml(drive.mcn)}</code></div>`
+      : ""
+  }
+      ${
+    drive.registerUrl
+      ? `<a class="register" href="${escapeHtml(drive.registerUrl)}" target="_blank" rel="noopener">register on MusicBrainz ↗</a>`
+      : ""
+  }
     </div>`;
 }
 
@@ -275,17 +402,28 @@ function updateMatchesSlot(card, drive, active) {
     return;
   }
   slot.innerHTML = `<div class="matches">
+    ${drive.matches.length > 1 ? '<h3 class="section-title">Matches</h3>' : ""}
     ${drive.matches
       .map(
         (match, index) => `
       <button
+        type="button"
         class="match ${index === drive.matchSel ? "selected" : ""}"
         data-match="${index}"
         ${active ? "disabled" : ""}
       >
-        ${escapeHtml(match.artist)} — ${escapeHtml(match.album)}
-        ${match.year ? ` (${escapeHtml(match.year)})` : ""}
-        ${match.discPosition ? ` disc ${escapeHtml(match.discPosition)}` : ""}
+        <span class="match-radio" aria-hidden="true"></span>
+        <span class="match-text">
+          <span class="match-line1">${escapeHtml(match.artist)} — ${escapeHtml(match.album)}</span>
+          <span class="match-line2">${
+            [
+              match.year ? escapeHtml(match.year) : "",
+              match.discPosition ? `disc ${escapeHtml(match.discPosition)}` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          }</span>
+        </span>
       </button>`
       )
       .join("")}
@@ -297,7 +435,7 @@ function updateTagsSlot(record, drive, active) {
   const meta = drive.meta;
   if (!meta) {
     if (record.formKey !== "none") {
-      slot.innerHTML = '<p class="muted">No metadata.</p>';
+      slot.innerHTML = "";
       record.formKey = "none";
     }
     return;
@@ -305,23 +443,25 @@ function updateTagsSlot(record, drive, active) {
   const formKey = `meta:${drive.matchSel}:${meta.tracks.length}`;
   if (record.formKey !== formKey) {
     slot.innerHTML = `<form class="tags" data-tags="${drive.index}">
-      <h3>Tags</h3>
-      <label>Artist <input name="artist" value="${escapeHtml(meta.artist)}"></label>
-      <label>Album <input name="album" value="${escapeHtml(meta.album)}"></label>
-      <label>Album artist <input name="albumArtist" value="${escapeHtml(
-        meta.albumArtist || ""
-      )}"></label>
-      <label>Year <input name="year" value="${escapeHtml(meta.year || "")}"></label>
+      <h3 class="section-title">Tags</h3>
+      <div class="tags-grid">
+        <label>Artist <input name="artist" value="${escapeHtml(meta.artist)}"></label>
+        <label>Album <input name="album" value="${escapeHtml(meta.album)}"></label>
+        <label>Album artist <input name="albumArtist" value="${escapeHtml(
+          meta.albumArtist || ""
+        )}"></label>
+        <label>Year <input name="year" value="${escapeHtml(meta.year || "")}"></label>
+      </div>
       <table>
         <thead>
-          <tr><th>#</th><th>Title</th><th>Artist</th></tr>
+          <tr><th class="col-num">#</th><th>Title</th><th>Track artist</th></tr>
         </thead>
         <tbody>
           ${meta.tracks
             .map(
               (track, index) => `
             <tr>
-              <td>${index + 1}</td>
+              <td class="col-num">${index + 1}</td>
               <td><input name="title-${index}" value="${escapeHtml(track.title)}"></td>
               <td><input name="artist-${index}" value="${escapeHtml(
                 track.artist || ""
@@ -331,7 +471,9 @@ function updateTagsSlot(record, drive, active) {
             .join("")}
         </tbody>
       </table>
-      <button type="submit">Save tags</button>
+      <div class="tags-actions">
+        <button type="submit" class="btn btn--primary">Save tags</button>
+      </div>
     </form>`;
     record.formKey = formKey;
   }
@@ -356,18 +498,22 @@ function updateRipSlot(record, drive) {
     record.ripRows = rows;
     slot.innerHTML = `
       <div class="rip">
-        <h3>Rip</h3>
+        <h3 class="section-title">Rip</h3>
+        <div class="rip-overall">
+          <span class="bar bar--lg"><span class="fill"></span></span>
+          <span class="rip-fraction"></span>
+        </div>
         <div class="rip-meta"></div>
         <table>
           <thead>
-            <tr><th>#</th><th>state</th><th>progress</th></tr>
+            <tr><th class="col-num">#</th><th>state</th><th class="col-prog">progress</th></tr>
           </thead>
           <tbody>
             ${rip.states
               .map(
                 (trackState) => `
               <tr data-state-number="${trackState.number}">
-                <td>${trackState.number}</td>
+                <td class="col-num">${trackState.number}</td>
                 <td class="state"></td>
                 <td class="prog"></td>
               </tr>`
@@ -384,11 +530,38 @@ function updateRipSlot(record, drive) {
   ]
     .filter(Boolean)
     .join(" ");
+  const { finished, units, fraction } = ripProgress(rip);
+  const overall = slot.querySelector(".rip-overall");
+  overall.querySelector(".fill").style.width = `${Math.round(fraction * 100)}%`;
+  overall.querySelector(".rip-fraction").textContent = `${finished} of ${units} tracks`;
   for (const trackState of rip.states) {
     const row = slot.querySelector(`[data-state-number="${trackState.number}"]`);
     if (!row) continue;
-    row.querySelector(".state").textContent = trackState.status;
-    row.querySelector(".prog").textContent = progress(trackState);
+    row.querySelector(".state").innerHTML = `
+      <span class="pill pill--sm pill--${statePill(trackState.status)}"><span class="pill-dot"></span>${trackState.status}</span>`;
+    let width = 0;
+    let barClass = "";
+    if (trackState.status === "done") {
+      width = 100;
+      barClass = "bar--done";
+    } else if (trackState.status === "failed") {
+      barClass = "bar--fail";
+    }
+    if (trackState.total) {
+      width = Math.max(width, Math.round((trackState.done / trackState.total) * 100));
+    }
+    const text = progress(trackState);
+    row.querySelector(".prog").innerHTML = `
+      <span class="prog-wrap">
+        <span class="bar ${barClass}"><span class="fill" style="width:${width}%"></span></span>
+        ${
+      text
+        ? `<span class="prog-text${
+            trackState.status === "failed" ? " prog-text--err" : ""
+          }">${escapeHtml(text)}</span>`
+        : ""
+    }
+      </span>`;
   }
   const summary = slot.querySelector(".summary");
   summary.textContent = rip.summary || "";
@@ -401,16 +574,18 @@ function updateCard(record, drive) {
   const active = Boolean(rip && rip.active);
 
   card.querySelector(".drive-label").textContent = drive.label;
-  card.querySelector(".drive-status").textContent = [
-    drive.status,
-    drive.disc ? ` / ${drive.disc}` : "",
-    drive.loadingToc ? " / reading TOC" : "",
+  card.querySelector(".drive-status").innerHTML = [
+    `<span class="pill ${drivePill(drive.status)}"><span class="pill-dot"></span>${escapeHtml(
+      drive.status || "unknown"
+    )}</span>`,
+    drive.disc
+      ? `<span class="pill pill--muted">${escapeHtml(drive.disc)} disc</span>`
+      : "",
+    drive.demo ? '<span class="pill pill--violet">demo</span>' : "",
   ]
     .filter(Boolean)
     .join("");
-  card.querySelector(".drive-path").textContent = `${drive.path}${
-    drive.demo ? " (demo)" : ""
-  }`;
+  card.querySelector(".drive-path").textContent = drive.path;
   const busy = active || pending.has(drive.index);
   card.querySelector('[data-action="load"]').disabled =
     busy || drive.demo || !drive.disc;
@@ -463,6 +638,7 @@ function updateTab(tab, drive) {
 
 function renderTabs() {
   const bar = $("#tabs");
+  bar.classList.toggle("hidden", !state.drives.length);
   const seen = new Set();
   state.drives.forEach((drive) => {
     seen.add(drive.index);
@@ -552,6 +728,7 @@ function render() {
   if (!state) return;
   renderSettings();
   renderTabs();
+  $("#empty").classList.toggle("hidden", state.drives.length > 0);
   const main = $("#drives");
   const seen = new Set();
   state.drives.forEach((drive) => {
@@ -562,6 +739,7 @@ function render() {
         card: buildCard(drive),
         checked: new Set(),
         tocKey: null,
+        tocRenderKey: null,
         metaKey: null,
         metaCover: null,
         formKey: null,
@@ -593,6 +771,19 @@ function bindDelegated() {
       const selected = tabIndex === activeTab;
       element.classList.toggle("active", selected);
       element.setAttribute("aria-selected", selected ? "true" : "false");
+    }
+  });
+  const settings = $("#settings");
+  settings.addEventListener("click", async (event) => {
+    const button = event.target.closest(".seg-btn");
+    if (!button) return;
+    const format = button.dataset.format;
+    if (format === state.format) return;
+    const seq = ++snapshotSeq;
+    try {
+      applySnapshot(seq, await post("/api/settings", { format }));
+    } catch (error) {
+      addLog(error.message);
     }
   });
   const main = $("#drives");
@@ -657,14 +848,43 @@ function bindDelegated() {
   });
 
   main.addEventListener("change", (event) => {
-    const checkbox = event.target.closest('input[data-track]');
-    if (!checkbox) return;
-    const card = checkbox.closest(".drive");
-    const record = cards.get(Number(card.dataset.index));
-    if (!record || !record.checked) return;
-    const number = Number(checkbox.dataset.track);
-    if (checkbox.checked) record.checked.add(number);
-    else record.checked.delete(number);
+    const checkbox = event.target.closest("input[data-track]");
+    if (checkbox) {
+      const card = checkbox.closest(".drive");
+      const record = cards.get(Number(card.dataset.index));
+      if (!record || !record.checked) return;
+      const number = Number(checkbox.dataset.track);
+      if (checkbox.checked) record.checked.add(number);
+      else record.checked.delete(number);
+      syncTocSlot(
+        card.querySelector(".toc-slot"),
+        [...card.querySelectorAll("input[data-track]")].map((box) => ({
+          number: Number(box.dataset.track),
+        })),
+        record.checked,
+        false
+      );
+      return;
+    }
+    const selectAll = event.target.closest("[data-select-all]");
+    if (selectAll) {
+      const card = selectAll.closest(".drive");
+      const record = cards.get(Number(card.dataset.index));
+      if (!record) return;
+      const boxes = card.querySelectorAll("input[data-track]");
+      for (const box of boxes) {
+        box.checked = selectAll.checked;
+        const number = Number(box.dataset.track);
+        if (selectAll.checked) record.checked.add(number);
+        else record.checked.delete(number);
+      }
+      syncTocSlot(
+        card.querySelector(".toc-slot"),
+        [...boxes].map((box) => ({ number: Number(box.dataset.track) })),
+        record.checked,
+        false
+      );
+    }
   });
 
   main.addEventListener("submit", async (event) => {
@@ -705,10 +925,21 @@ function bindDelegated() {
   });
 }
 
+function setConn(on) {
+  const conn = $("#conn");
+  conn.classList.toggle("on", on);
+  conn.classList.toggle("off", !on);
+  conn.querySelector(".conn-text").textContent = on ? "live" : "reconnecting";
+}
+
 function connect() {
   const source = new EventSource("/api/events");
   source.onopen = () => {
+    setConn(true);
     refresh().catch((error) => addLog(error.message));
+  };
+  source.onerror = () => {
+    setConn(false);
   };
   source.onmessage = (message) => {
     let event;

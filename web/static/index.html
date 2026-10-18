@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>rend</title>
+  <title>rend — cd ripper</title>
   <link rel="icon" type="image/svg+xml" href="/icon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/icon-16.png">
@@ -14,14 +14,33 @@
     <div class="brand">
       <img src="/icon.svg" alt="" class="logo" width="28" height="28">
       <h1>rend</h1>
+      <span class="tagline">cd ripper</span>
     </div>
     <div id="settings" class="settings"></div>
+    <div id="conn" class="conn" title="live connection to rend-wui">
+      <span class="conn-dot"></span>
+      <span class="conn-text">connecting</span>
+    </div>
   </header>
   <nav id="tabs" class="tabs" role="tablist" aria-label="drives"></nav>
   <main id="drives" class="drives"></main>
+  <section id="empty" class="empty hidden">
+    <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <circle cx="32" cy="32" r="29" stroke="currentColor" stroke-width="2.5"/>
+      <circle cx="32" cy="32" r="9" stroke="currentColor" stroke-width="2.5"/>
+      <circle cx="32" cy="32" r="2.5" fill="currentColor"/>
+    </svg>
+    <h2>No drives detected</h2>
+    <p>
+      Insert a disc into a CD-ROM drive, or start
+      <code>rend-wui --demo</code> with a simulated disc.
+    </p>
+  </section>
   <section class="log">
-    <h2>Activity</h2>
-    <ol id="log-list"></ol>
+    <div class="log-inner">
+      <h2>Activity</h2>
+      <ol id="log-list"></ol>
+    </div>
   </section>
   <script src="/app.js"></script>
 </body>
