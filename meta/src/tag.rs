@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 
 use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::tag::{Accessor, ItemKey, Tag, TagType};
 
@@ -103,16 +103,23 @@ pub enum Error {
 /// Writes `tags` (and the cover `art`, if any) into the audio file at
 /// `path`, in place.
 ///
-/// FLAC files get every field, including all six MusicBrainz ids, via Vorbis
-/// comments. Other formats are written as ID3v2, where lofty can only carry the
-/// catalog number, release-artist id and artist id; the release and
-/// release-track ids have no standard four-letter frame and the recording id's
-/// UFID frame is dropped, so those three are not written for ID3v2.
+/// FLAC, Ogg Vorbis, and Opus files get every field, including all six
+/// MusicBrainz ids, via Vorbis comments. M4A files get MP4 tags. Other
+/// formats are written as ID3v2, where lofty can only carry the catalog
+/// number, release-artist id and artist id; the release and release-track ids
+/// have no standard four-letter frame and the recording id's UFID frame is
+/// dropped, so those three are not written for ID3v2.
 pub fn apply(path: &Path, tags: &TrackTags, art: Option<&[u8]>) -> Result<(), Error> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let mut audio = lofty::read_from(&mut file)?;
-    let tag_type = match audio.file_type() {
-        FileType::Flac => TagType::VorbisComments,
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let tag_type = match extension.as_str() {
+        "flac" | "ogg" | "opus" => TagType::VorbisComments,
+        "m4a" | "mp4" | "mp4a" => TagType::Mp4Ilst,
         _ => TagType::Id3v2,
     };
     if audio.tag(tag_type).is_none() {
@@ -405,7 +412,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.flac");
         {
-            let mut w = rend_encode::flac::FlacWriter::create(&path).unwrap();
+            let mut w = rend_encode::Format::parse("flac")
+                .unwrap()
+                .create_file(&path)
+                .unwrap();
             w.write(&vec![0u8; 44_100 * 4]).unwrap();
             w.finish().unwrap();
         }
@@ -443,7 +453,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.flac");
         {
-            let mut w = rend_encode::flac::FlacWriter::create(&path).unwrap();
+            let mut w = rend_encode::Format::parse("flac")
+                .unwrap()
+                .create_file(&path)
+                .unwrap();
             w.write(&vec![0u8; 44_100 * 4]).unwrap();
             w.finish().unwrap();
         }

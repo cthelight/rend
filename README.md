@@ -7,14 +7,15 @@ A Rust terminal application built on `rend-core`, a low-level wrapper
 around the Linux `cdrom` ioctl interface.
 
 > [!NOTE]
-> Install `ffmpeg` for the best results: the default output is FLAC,
-> which is encoded with it. Without `ffmpeg`, rip with `-F wav` — WAV
-> needs no external tools.
+> Install `ffmpeg` for the best results. `rend` detects the ffmpeg-backed
+> formats that are installed (FLAC, MP3, AAC/M4A, Opus, and Vorbis/OGG)
+> and uses the first available one by default. Without `ffmpeg`, rip with
+> `-F wav` — WAV needs no external tools.
 
 ## Layout
 
 - `core/` — `rend-core`: device discovery, TOC, CDDA audio reading
-- `encode/` — `rend-encode`: output formats (FLAC via ffmpeg, WAV)
+- `encode/` — `rend-encode`: output formats (ffmpeg-backed audio formats plus WAV)
 - `meta/` — `rend-meta`: MusicBrainz disc lookup and tag writing (lofty)
 - `cli/` — `rend`: the command-line interface
 - `tui/` — `rend-tui`: an interactive TUI with mouse support
@@ -28,7 +29,8 @@ rend toc                       # show disc table of contents
 rend rip                       # rip all audio tracks to ./<artist>/<album>/<NN> <title>.flac
 rend rip -t 3 -t 5 -o ~/rips   # rip selected tracks to a directory
 rend rip -f                    # overwrite existing files
-rend rip -F wav                # output WAV instead of FLAC
+rend rip -F mp3 -q 192         # output MP3 at 192 kbps
+rend rip -F wav                # output WAV
 rend rip --no-metadata         # rip without looking up or tagging metadata
 rend info                      # look up and show the disc's metadata
 rend info --matches            # list every candidate match, best first
@@ -54,20 +56,28 @@ instead. Progress is reported on stderr.
 
 ### Output format
 
-By default each track is encoded to **FLAC** at the highest compression
-(`-compression_level 8`) by shelling out to `ffmpeg`. Pass `-F wav` (or
-`--format wav`) to write raw 16-bit stereo 44.1 kHz **WAV** instead, which
-needs no external tools. The encode step lives in `rend-encode`, a
-self-contained layer so further formats can be added without touching the
-CLI or TUI. FLAC output requires `ffmpeg` on `PATH`; the CLI errors out
-with a clear message if it is missing and a FLAC rip is requested.
+`rend` discovers the available output formats at startup. WAV is always
+available; the ffmpeg-backed formats — FLAC, MP3, AAC/M4A, Opus, and
+Vorbis/OGG — are enabled when their encoder is installed. Without an
+explicit `-F/--format`, the first available format in that preference
+order is used.
+
+Quality is selected with `-q/--quality` (for example `192`, `192k`, or
+`q6`). The quality scale depends on the format: FLAC uses compression
+levels 0–8, Vorbis uses quality 0–10, and MP3/AAC/Opus use bitrates.
+`-F wav` writes raw 16-bit stereo 44.1 kHz WAV and has no quality option.
+
+The encode step lives in `rend-encode`, a self-contained layer so further
+formats can be added without touching the CLI or TUI. A rip in a format
+that the local `ffmpeg` cannot encode fails with a clear message.
 
 ### Metadata
 
 Before ripping, `rend` computes the disc's CDDB ID from the track lengths
 and looks the disc up on **MusicBrainz** (with cover art from the
-**Cover Art Archive**). The result is embedded into each track file: FLAC
-gets Vorbis comments plus a `PICTURE` block, WAV gets an ID3v2 tag. Title,
+**Cover Art Archive**). The result is embedded into each track file: FLAC, OGG, and Opus get
+Vorbis comments (with a `PICTURE` block where supported), M4A gets MP4
+ilst metadata, and WAV gets an ID3v2 tag. Title,
 artist, album, album artist, track number/total, and year are written when
 known. The lookup is best effort: without network access, or when the disc
 isn't found, the rip proceeds with no tags. Use `--no-metadata` to skip
@@ -120,7 +130,8 @@ table of contents, and watching rips in real time:
 rend-tui                       # use the first CD-ROM device
 rend-tui -d /dev/sr1           # use a specific device
 rend-tui -o ~/rips -f          # rip to ~/rips, overwriting existing files
-rend-tui -F wav                # rip to WAV instead of FLAC
+rend-tui -F mp3 -q 192         # rip to MP3 at 192 kbps
+rend-tui -F wav                # rip to WAV
 rend-tui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-tui --demo                # simulated disc, no hardware required
 ```
@@ -139,7 +150,8 @@ Keyboard:
 | `u`              | show the register disc id URL   |
 | `e`              | eject the disc                  |
 | `f`              | toggle force (overwrite)        |
-| `o`              | toggle output format (flac/wav) |
+| `o`              | cycle the output format         |
+| `Q`              | cycle the output quality        |
 | `s`              | stop the current rip            |
 | `?`              | toggle the keybinds window      |
 | `q`/`esc`        | quit                            |
@@ -189,7 +201,8 @@ and ripping flows:
 rend-wui                       # use the first CD-ROM device
 rend-wui -d /dev/sr1           # use a specific device
 rend-wui -o ~/rips -f          # rip to ~/rips, overwriting existing files
-rend-wui -F wav                # rip to WAV instead of FLAC
+rend-wui -F mp3 -q 192         # rip to MP3 at 192 kbps
+rend-wui -F wav                # rip to WAV
 rend-wui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-wui --demo                # simulated disc, no hardware required
 ```
@@ -206,6 +219,9 @@ as a service:
   get their own subdirectory only when several rip at once
 
 A flag given on the command line overrides the environment.
+
+The settings bar shows every output format the server can serve, and a
+quality selector when the selected format has one.
 
 Each discovered drive gets a tab in the tab bar; select one to see its
 table of contents, MusicBrainz candidate matches and cover art, editable

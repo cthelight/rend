@@ -86,10 +86,10 @@ fn rip_with_two_missing_devices_fails_cleanly() {
 #[test]
 fn rip_rejects_unknown_format() {
     bin()
-        .args(["rip", "--format", "mp3"])
+        .args(["rip", "--format", "mpegts"])
         .assert()
         .code(2)
-        .stderr(contains("unknown format 'mp3'"));
+        .stderr(contains("unknown format 'mpegts'"));
 }
 
 #[test]

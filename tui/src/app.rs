@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::{Margin, Position, Rect};
 
 use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
-use rend_encode::{Format, ffmpeg_available};
+use rend_encode::{Format, FormatSet};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
     register_disc_id_url,
@@ -475,6 +475,8 @@ pub struct App {
     pub tracks_scroll: usize,
     /// Rips keyed by drive index; several drives can rip at once.
     rips: HashMap<usize, DriveRip>,
+    /// The formats available on this machine, in cycle order.
+    pub formats: FormatSet,
     /// The format new rips write in.
     pub format: Format,
     /// The naming template new rips lay their track files out with.
@@ -493,6 +495,7 @@ impl App {
         device: Option<&str>,
         out_dir: PathBuf,
         force: bool,
+        formats: FormatSet,
         format: Format,
         template: Template,
         demo: bool,
@@ -520,6 +523,7 @@ impl App {
             track_sel: 0,
             tracks_scroll: 0,
             rips: HashMap::new(),
+            formats,
             format,
             template,
             force,
@@ -1045,8 +1049,12 @@ impl App {
                 ));
             }
             KeyCode::Char('o') => {
-                self.format = self.format.next();
-                self.status = Some(format!("output format: {}", self.format.label()));
+                self.format = self.formats.next_format(self.format);
+                self.status = Some(format!("output format: {}", self.format.display_label()));
+            }
+            KeyCode::Char('Q') => {
+                self.format = self.format.cycle_quality();
+                self.status = Some(format!("output quality: {}", self.format.display_label()));
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
@@ -1598,9 +1606,12 @@ impl App {
             self.status = Some("a rip is already running on this drive".into());
             return;
         }
-        if self.format.requires_ffmpeg() && !ffmpeg_available() {
-            self.status =
-                Some("ffmpeg not found in PATH — install it, or switch to wav with o".into());
+        if !self.formats.contains(self.format) {
+            self.status = Some(format!(
+                "{} is not available on this system — press o to switch to {}",
+                self.format.label(),
+                self.formats.default_format().label()
+            ));
             return;
         }
         let Some(toc) = self.toc.clone() else {
@@ -1744,10 +1755,15 @@ mod tests {
     use lofty::tag::Accessor;
 
     fn demo_app(dir: &std::path::Path) -> App {
+        demo_app_with(dir, FormatSet::all())
+    }
+
+    fn demo_app_with(dir: &std::path::Path, formats: FormatSet) -> App {
         App::new(
             None,
             dir.to_path_buf(),
             false,
+            formats,
             Format::default(),
             Template::default(),
             true,
@@ -1981,19 +1997,32 @@ mod tests {
     #[test]
     fn format_toggles() {
         let dir = tempfile::tempdir().unwrap();
+        let formats = FormatSet::new(vec![rend_encode::FLAC, rend_encode::WAV]);
+        let mut app = demo_app_with(dir.path(), formats);
+        assert_eq!(app.format, Format::default());
+        app.handle_key(key('o'));
+        assert_eq!(app.format.id(), "wav");
+        app.handle_key(key('o'));
+        assert_eq!(app.format.id(), "flac");
+    }
+
+    #[test]
+    fn quality_cycles() {
+        let dir = tempfile::tempdir().unwrap();
         let mut app = demo_app(dir.path());
-        assert_eq!(app.format, Format::Flac);
-        app.handle_key(key('o'));
-        assert_eq!(app.format, Format::Wav);
-        app.handle_key(key('o'));
-        assert_eq!(app.format, Format::Flac);
+        app.format = Format::from_id("mp3", Some(320)).unwrap();
+        app.handle_key(key('Q'));
+        assert_eq!(app.format.quality(), 128);
+        app.format = Format::default();
+        app.handle_key(key('Q'));
+        assert_eq!(app.format.quality(), 0);
     }
 
     #[test]
     fn rips_in_wav_format_when_selected() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = demo_app(dir.path());
-        app.format = Format::Wav;
+        app.format = Format::parse("wav").unwrap();
         app.track_sel = 2;
         app.rip_selected_track();
         drain_until_finished(&mut app, Duration::from_secs(10));
@@ -2382,6 +2411,7 @@ mod tests {
             Some(media.to_str().unwrap()),
             dir.path().to_path_buf(),
             false,
+            FormatSet::probe(),
             Format::default(),
             Template::default(),
             false,

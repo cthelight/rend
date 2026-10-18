@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
-use rend_encode::{Format, ffmpeg_available};
+use rend_encode::{Format, FormatSet, QualityKind};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
     register_disc_id_url,
@@ -27,8 +27,8 @@ use rend_rip::{RipEvent, RipJob, RipSource, spawn};
 use tokio::sync::broadcast;
 
 use crate::view::{
-    DriveView, MatchView, MetaView, RipEventView, RipView, ServerEvent, StateView, TocView,
-    TrackStateView, cover_data_url,
+    DriveView, FormatView, MatchView, MetaView, QualityOptionView, RipEventView, RipView,
+    ServerEvent, StateView, TocView, TrackStateView, cover_data_url,
 };
 
 /// The drives and their per-drive state, plus the shared metadata cache
@@ -43,7 +43,7 @@ pub struct AppState {
     /// `None` keeps the default: per-drive subdirectories only when
     /// several drives are present.
     drive_dirs: Option<bool>,
-    ffmpeg: bool,
+    formats: FormatSet,
     meta_tx: Mutex<mpsc::Sender<MetaEvent>>,
     meta_rx: Mutex<Option<mpsc::Receiver<MetaEvent>>>,
     running: AtomicBool,
@@ -186,13 +186,13 @@ impl AppState {
     pub fn new(
         out_dir: PathBuf,
         device: Option<&str>,
+        formats: FormatSet,
         format: Format,
         force: bool,
         template: Template,
         drive_dirs: Option<bool>,
         demo: bool,
     ) -> Result<Arc<Self>, String> {
-        let ffmpeg = ffmpeg_available();
         let (events, _) = broadcast::channel(1024);
         let (meta_tx, meta_rx) = mpsc::channel();
         let drives = if demo {
@@ -218,7 +218,7 @@ impl AppState {
             events,
             out_dir,
             drive_dirs,
-            ffmpeg,
+            formats,
             meta_tx: Mutex::new(meta_tx),
             meta_rx: Mutex::new(Some(meta_rx)),
             running: AtomicBool::new(false),
@@ -360,10 +360,39 @@ impl AppState {
     pub fn view(&self) -> StateView {
         let settings = self.settings_guard();
         let drives = self.drives_guard();
+        let formats = self
+            .formats
+            .formats()
+            .iter()
+            .map(|spec| {
+                let quality_options = spec
+                    .options
+                    .iter()
+                    .map(|value| {
+                        let label = if spec.quality_kind == QualityKind::None {
+                            spec.label.to_string()
+                        } else {
+                            spec.quality_label(*value)
+                        };
+                        QualityOptionView {
+                            value: *value,
+                            label,
+                        }
+                    })
+                    .collect();
+                FormatView {
+                    id: spec.id.to_string(),
+                    label: spec.label.to_string(),
+                    quality_options,
+                }
+            })
+            .collect();
         StateView {
             out_dir: self.out_dir.to_string_lossy().into_owned(),
-            ffmpeg: self.ffmpeg,
-            format: settings.format.label().to_string(),
+            formats,
+            format: settings.format.id().to_string(),
+            quality: settings.format.quality(),
+            quality_label: settings.format.quality_label(),
             force: settings.force,
             drives: drives
                 .iter()
@@ -377,7 +406,13 @@ impl AppState {
         self.events.subscribe()
     }
 
-    pub fn set_format(&self, format: Format) {
+    pub fn set_format(&self, format: Format) -> Result<(), ApiError> {
+        if !self.formats.contains(format) {
+            return Err(ApiError::bad(format!(
+                "output format '{}' is not available on this system",
+                format.id()
+            )));
+        }
         let changed = {
             let mut settings = self.settings_guard();
             let changed = settings.format != format;
@@ -385,8 +420,24 @@ impl AppState {
             changed
         };
         if changed {
-            self.emit_log(format!("output format set to {}", format.label()));
+            self.emit_log(format!("output format set to {}", format.display_label()));
         }
+        Ok(())
+    }
+
+    pub fn set_quality(&self, quality: i32) -> Result<(), ApiError> {
+        let current = self.settings_guard().format;
+        let format = current.with_quality(quality).map_err(ApiError::bad)?;
+        let changed = {
+            let mut settings = self.settings_guard();
+            let changed = settings.format != format;
+            settings.format = format;
+            changed
+        };
+        if changed {
+            self.emit_log(format!("output quality set to {}", format.quality_label()));
+        }
+        Ok(())
     }
 
     pub fn set_force(&self, force: bool) {
@@ -589,8 +640,11 @@ impl AppState {
                     )));
                 }
             }
-            if format.requires_ffmpeg() && !self.ffmpeg {
-                return Err(ApiError::bad("ffmpeg is required for flac output"));
+            if !self.formats.contains(format) {
+                return Err(ApiError::bad(format!(
+                    "output format '{}' is not available on this system",
+                    format.id()
+                )));
             }
             let per_drive = self.drive_dirs.unwrap_or(drives.len() > 1);
             let out_dir = if per_drive {
@@ -1549,7 +1603,7 @@ impl RipControl {
             active: self.active,
             tracks: self.tracks.clone(),
             out_dir: self.out_dir.to_string_lossy().into_owned(),
-            format: self.format.label().to_string(),
+            format: self.format.display_label(),
             force: self.force,
             states: self.states.iter().map(RipTrackState::view).collect(),
             summary: self.summary.clone(),
@@ -1672,7 +1726,8 @@ mod tests {
         AppState::new(
             dir.to_path_buf(),
             None,
-            Format::Wav,
+            FormatSet::without_ffmpeg(),
+            Format::parse("wav").unwrap(),
             force,
             Template::default(),
             drive_dirs,
@@ -1718,13 +1773,26 @@ mod tests {
     #[test]
     fn settings_update_the_state_view() {
         let dir = tempfile::tempdir().unwrap();
-        let state = demo_state(dir.path(), false);
+        let state = AppState::new(
+            dir.path().to_path_buf(),
+            None,
+            FormatSet::all(),
+            Format::parse("wav").unwrap(),
+            false,
+            Template::default(),
+            None,
+            true,
+        )
+        .unwrap();
 
-        state.set_format(Format::Flac);
+        state.set_format(Format::parse("flac").unwrap()).unwrap();
+        state.set_quality(5).unwrap();
         state.set_force(true);
 
         let view = state.view();
         assert_eq!(view.format, "flac");
+        assert_eq!(view.quality, 5);
+        assert_eq!(view.quality_label, "5");
         assert!(view.force);
     }
 
@@ -2017,7 +2085,7 @@ mod tests {
                 stopped: false,
                 tracks: vec![1],
                 out_dir: dir.path().to_path_buf(),
-                format: Format::Wav,
+                format: Format::parse("wav").unwrap(),
                 force: false,
                 toc: DemoDisc::new().toc,
                 states: vec![RipTrackState {

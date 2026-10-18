@@ -115,6 +115,8 @@ struct SettingsRequest {
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
+    quality: Option<i32>,
+    #[serde(default)]
     force: Option<bool>,
 }
 
@@ -124,8 +126,17 @@ async fn update_settings(
 ) -> Response {
     if let Some(raw) = req.format {
         match Format::parse(&raw) {
-            Ok(format) => state.set_format(format),
+            Ok(format) => {
+                if let Err(error) = state.set_format(format) {
+                    return error_response(error);
+                }
+            }
             Err(message) => return error_response(ApiError::bad(message)),
+        }
+    }
+    if let Some(quality) = req.quality {
+        if let Err(error) = state.set_quality(quality) {
+            return error_response(error);
         }
     }
     if let Some(force) = req.force {

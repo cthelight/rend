@@ -379,7 +379,12 @@ mod tests {
     #[test]
     fn rips_a_demo_track_to_wav_when_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let events = run_job(vec![3], dir.path().to_path_buf(), false, Format::Wav);
+        let events = run_job(
+            vec![3],
+            dir.path().to_path_buf(),
+            false,
+            Format::parse("wav").unwrap(),
+        );
 
         let expected = dir.path().join("track03.wav");
         assert!(expected.exists());

@@ -170,10 +170,20 @@ function statePill(status) {
 }
 
 function renderSettings() {
-  const key = `${state.format}:${state.force}:${state.outDir}`;
+  const key = [
+    state.format,
+    state.quality,
+    state.force,
+    state.outDir,
+    state.formats
+      .map((format) => `${format.id}:${format.qualityOptions.map((o) => o.value).join(",")}`)
+      .join("|"),
+  ].join(":");
   if (settingsKey === key) return;
   settingsKey = key;
 
+  const currentFormat = state.formats.find((format) => format.id === state.format);
+  const qualityOptions = currentFormat?.qualityOptions ?? [];
   const settings = $("#settings");
   settings.innerHTML = `
     <span class="chip" title="output directory">
@@ -181,18 +191,42 @@ function renderSettings() {
       <span class="chip-text">${escapeHtml(state.outDir)}</span>
     </span>
     <div class="seg" role="group" aria-label="output format">
-      <button type="button" class="seg-btn ${state.format === "flac" ? "active" : ""}" data-format="flac">flac</button>
-      <button type="button" class="seg-btn ${state.format === "wav" ? "active" : ""}" data-format="wav">wav</button>
+      ${state.formats
+        .map(
+          (format) => `
+      <button type="button" class="seg-btn ${state.format === format.id ? "active" : ""}" data-format="${format.id}">
+        ${escapeHtml(format.label)}
+      </button>`
+        )
+        .join("")}
     </div>
+    ${
+      qualityOptions.length
+        ? `
+    <label class="quality">
+      <span>quality</span>
+      <select id="quality">
+        ${qualityOptions
+          .map(
+            (option) => `
+        <option value="${option.value}" ${state.quality === option.value ? "selected" : ""}>
+          ${escapeHtml(option.label)}
+        </option>`
+          )
+          .join("")}
+      </select>
+    </label>`
+        : ""
+    }
     <label class="switch" title="overwrite existing files">
       <input type="checkbox" id="force" ${state.force ? "checked" : ""}>
       <span class="switch-track" aria-hidden="true"></span>
       <span>force</span>
     </label>
-    ${state.ffmpeg ? "" : '<span class="chip chip--warn">ffmpeg not found — flac unavailable</span>'}
   `;
 
-  $("#force").addEventListener("change", async (event) => {
+  const force = $("#force");
+  force.addEventListener("change", async (event) => {
     const previous = state.force;
     const seq = ++snapshotSeq;
     try {
@@ -202,6 +236,23 @@ function renderSettings() {
       event.target.checked = previous;
     }
   });
+
+  const quality = $("#quality");
+  if (quality) {
+    quality.addEventListener("change", async (event) => {
+      const previous = state.quality;
+      const seq = ++snapshotSeq;
+      try {
+        applySnapshot(
+          seq,
+          await post("/api/settings", { quality: Number(event.target.value) })
+        );
+      } catch (error) {
+        addLog(error.message);
+        event.target.value = previous;
+      }
+    });
+  }
 }
 
 function buildCard(drive) {

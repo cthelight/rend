@@ -8,7 +8,7 @@ use std::thread;
 
 use clap::Parser;
 use rend_core::{Device, Error, FRAMES_PER_SECOND, Toc};
-use rend_encode::{Format, ffmpeg_available};
+use rend_encode::{Format, FormatSet};
 use rend_meta::{
     Candidate, DEFAULT_TEMPLATE, DiscMeta, DiscToc, MetaCache, Template, cover_art, disc_id,
     lookup_candidates,
@@ -32,7 +32,7 @@ enum Command {
     Drives,
     /// Show the table of contents of the disc.
     Toc,
-    /// Rip audio tracks to FLAC (default) or WAV files (across several drives in parallel).
+    /// Rip audio tracks to the selected output format (across several drives in parallel).
     Rip {
         #[command(flatten)]
         args: RipArgs,
@@ -57,9 +57,14 @@ struct RipArgs {
     /// Directory to write the track files to.
     #[arg(short, long, default_value = ".")]
     output_dir: PathBuf,
-    /// Output format: flac (default, transcoded with ffmpeg) or wav.
-    #[arg(short = 'F', long = "format", default_value = "flac", value_parser = Format::parse)]
-    format: Format,
+    /// Output format (default: the best available format — flac when ffmpeg
+    /// supports it, otherwise wav).
+    #[arg(short = 'F', long = "format", value_parser = Format::parse)]
+    format: Option<Format>,
+    /// Quality for the output format (for example flac 0-8, mp3 320, aac
+    /// 256, opus 128, vorbis 6; default: the format's default).
+    #[arg(short = 'q', long = "quality", value_name = "QUALITY")]
+    quality: Option<String>,
     /// Naming template for the track files: `<artist>/<album>/<number>
     /// <title>` by default, with the tokens `<artist>`, `<album>`,
     /// `<album-artist>`, `<year>`, `<number>`, `<title>`, and
@@ -307,6 +312,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
     let RipArgs {
         output_dir,
         format,
+        quality,
         template,
         tracks,
         force,
@@ -314,12 +320,10 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
         no_metadata,
         r#match,
     } = args;
-    if format.requires_ffmpeg() && !ffmpeg_available() {
-        return Err(Error::Unexpected(
-            "ffmpeg not found in PATH — install it for FLAC output, or rip with --format wav"
-                .into(),
-        ));
-    }
+    let set = FormatSet::probe();
+    let format = set
+        .resolve(*format, quality.as_deref())
+        .map_err(Error::Unexpected)?;
     let template = Template::parse(template)
         .map_err(|e| Error::Unexpected(format!("invalid --template: {e}")))?;
     let resolved = rip_devices(devices, *all)?;
@@ -349,7 +353,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
                 String::new()
             };
             let opts = RipOptions {
-                format: *format,
+                format,
                 template: template.clone(),
                 force: *force,
                 no_metadata: *no_metadata,

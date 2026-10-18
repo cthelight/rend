@@ -392,7 +392,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .unwrap_or(app.out_dir.as_path())
         .display()
         .to_string();
-    let mut title = format!(" Ripping to {out_display} · {}", app.format.label());
+    let mut title = format!(" Ripping to {out_display} · {}", app.format.display_label());
     if app.force {
         title.push_str(" · force on");
     }
@@ -532,7 +532,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_help(f: &mut Frame) {
     let area = f.area();
     let width = 54u16.min(area.width.saturating_sub(2));
-    let height = 18u16.min(area.height.saturating_sub(2));
+    let height = 19u16.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -557,6 +557,7 @@ fn draw_help(f: &mut Frame) {
         ("u", "show the register disc id URL"),
         ("e", "eject the disc"),
         ("o", "cycle the output format"),
+        ("Q", "cycle the output quality"),
         ("f", "toggle force (overwrite)"),
         ("s", "stop the selected rip"),
         ("?", "show or close this help"),
@@ -871,7 +872,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use rend_core::TrackType;
-    use rend_encode::Format;
+    use rend_encode::{Format, FormatSet};
     use rend_meta::Template;
 
     /// Renders the app once and returns the whole screen as one string.
@@ -913,7 +914,8 @@ mod tests {
             None,
             dir.to_path_buf(),
             false,
-            Format::Flac,
+            FormatSet::all(),
+            Format::default(),
             Template::default(),
             true,
         )
@@ -922,14 +924,7 @@ mod tests {
     #[test]
     fn draws_the_tags_editor_modal() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(
-            None,
-            dir.path().to_path_buf(),
-            false,
-            Format::Flac,
-            Template::default(),
-            true,
-        );
+        let mut app = demo_app(dir.path());
 
         // Without the editor, no modal is drawn.
         let plain = rendered(&mut app);

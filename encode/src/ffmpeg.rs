@@ -1,9 +1,9 @@
-//! FLAC output: raw PCM streamed into an `ffmpeg` process.
+//! Audio output through an `ffmpeg` process.
 //!
-//! The track is encoded in a single pass — PCM is written to ffmpeg's stdin
-//! pipe while it writes the finished FLAC file itself, so no intermediate
-//! WAV ever touches the disk. `ffmpeg` is the one external tool rend needs;
-//! it is invoked with long-supported flags only.
+//! The track is encoded in a single pass — raw PCM is written to ffmpeg's
+//! stdin pipe while it writes the finished file itself, so no intermediate
+//! file ever touches the disk. The codec and its quality arguments are
+//! supplied by the caller, so one writer serves every ffmpeg-backed format.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -11,42 +11,43 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-/// The external encoder used for FLAC output.
+/// The external encoder used for every ffmpeg-backed output format.
 pub const FFMPEG: &str = "ffmpeg";
 
-/// The highest FLAC compression level (the scale runs 0–8).
-const COMPRESSION_LEVEL: &str = "8";
-
-/// A FLAC file being written by an ffmpeg process fed over stdin.
-pub struct FlacWriter {
+/// A file being written by an ffmpeg process fed over stdin.
+pub struct FfmpegWriter {
     child: Child,
     stdin: Option<ChildStdin>,
     stderr: Arc<Mutex<Vec<u8>>>,
 }
 
-impl FlacWriter {
+impl FfmpegWriter {
     /// Spawns ffmpeg, ready to receive raw PCM (s16le, 44 100 Hz, stereo) on
-    /// stdin and write a FLAC file at `path`.
-    pub fn create(path: &Path) -> io::Result<Self> {
-        let mut child = Command::new(FFMPEG)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "s16le",
-                "-ar",
-                "44100",
-                "-ac",
-                "2",
-                "-i",
-                "pipe:0",
-                "-c:a",
-                "flac",
-                "-compression_level",
-                COMPRESSION_LEVEL,
-                "-y",
-            ])
+    /// stdin and write a file at `path` using `encoder` and `quality_args`.
+    pub fn create(path: &Path, encoder: &str, quality_args: Vec<String>) -> io::Result<Self> {
+        let mut args: Vec<String> = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-f".to_string(),
+            "s16le".to_string(),
+            "-ar".to_string(),
+            "44100".to_string(),
+            "-ac".to_string(),
+            "2".to_string(),
+            "-i".to_string(),
+            "pipe:0".to_string(),
+            "-c:a".to_string(),
+            encoder.to_string(),
+        ];
+        args.extend(quality_args);
+        args.push("-y".to_string());
+
+        let mut command = Command::new(FFMPEG);
+        for arg in &args {
+            command.arg(arg);
+        }
+        let mut child = command
             .arg(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -108,7 +109,7 @@ impl FlacWriter {
     }
 }
 
-impl Drop for FlacWriter {
+impl Drop for FfmpegWriter {
     /// Kills a still-running encoder (e.g. the track was stopped mid-read).
     fn drop(&mut self) {
         self.child.kill().ok();

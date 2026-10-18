@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use rend_encode::Format;
+use rend_encode::{Format, FormatSet};
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 use rend_wui::api::router;
 use rend_wui::state::AppState;
@@ -27,9 +27,13 @@ struct Cli {
     #[arg(short = 'o', long, default_value = ".", env = "REND_WUI_OUTPUT_DIR")]
     output_dir: PathBuf,
 
-    /// Output format: flac or wav.
-    #[arg(short = 'F', long, default_value = "flac", value_parser = Format::parse)]
-    format: Format,
+    /// Output format. Without it, the best installed default is used.
+    #[arg(short = 'F', long, value_parser = Format::parse)]
+    format: Option<Format>,
+
+    /// Output quality, e.g. `256`, `256k`, or `q6`.
+    #[arg(short = 'q', long)]
+    quality: Option<String>,
 
     /// Filename template, e.g. `<artist>/<album>/<number> <title>`.
     #[arg(short = 'T', long, default_value = DEFAULT_TEMPLATE, env = "REND_WUI_TEMPLATE")]
@@ -56,10 +60,13 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let template = Template::parse(&cli.template)?;
+    let formats = FormatSet::probe();
+    let format = formats.resolve(cli.format, cli.quality.as_deref())?;
     let state = AppState::new(
         cli.output_dir,
         cli.device.as_deref(),
-        cli.format,
+        formats,
+        format,
         cli.force,
         template,
         cli.drive_dirs,

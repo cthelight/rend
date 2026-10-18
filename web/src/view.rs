@@ -15,10 +15,29 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 pub struct StateView {
     pub out_dir: String,
-    pub ffmpeg: bool,
+    pub formats: Vec<FormatView>,
     pub format: String,
+    pub quality: i32,
+    pub quality_label: String,
     pub force: bool,
     pub drives: Vec<DriveView>,
+}
+
+/// One output format the local ffmpeg installation can serve.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatView {
+    pub id: String,
+    pub label: String,
+    pub quality_options: Vec<QualityOptionView>,
+}
+
+/// One selectable quality value for an output format.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityOptionView {
+    pub value: i32,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

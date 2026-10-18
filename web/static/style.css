@@ -151,6 +151,24 @@ header h1 {
   box-shadow: inset 0 0 0 1px var(--border);
 }
 
+.quality {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-2);
+}
+
+.quality select {
+  background: var(--inset);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.32rem 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
 .switch {
   display: inline-flex;
   align-items: center;
