@@ -25,6 +25,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(root))
         .route("/style.css", get(style))
         .route("/app.js", get(app_js))
+        .route("/icon.svg", get(icon_svg))
+        .route("/icon-16.png", get(icon_16))
+        .route("/icon-32.png", get(icon_32))
         .route("/api/state", get(state_view))
         .route("/api/events", get(events))
         .route("/api/settings", post(update_settings))
@@ -47,6 +50,18 @@ async fn style(State(_state): State<Arc<AppState>>) -> Response {
 
 async fn app_js(State(_state): State<Arc<AppState>>) -> Response {
     serve("app.js")
+}
+
+async fn icon_svg(State(_state): State<Arc<AppState>>) -> Response {
+    serve("icon.svg")
+}
+
+async fn icon_16(State(_state): State<Arc<AppState>>) -> Response {
+    serve("icon-16.png")
+}
+
+async fn icon_32(State(_state): State<Arc<AppState>>) -> Response {
+    serve("icon-32.png")
 }
 
 fn serve(file: &str) -> Response {

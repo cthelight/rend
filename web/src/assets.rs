@@ -17,6 +17,8 @@ fn mime(path: &str) -> &'static str {
         "index.html" => "text/html; charset=utf-8",
         "style.css" => "text/css; charset=utf-8",
         "app.js" => "text/javascript; charset=utf-8",
+        "icon.svg" => "image/svg+xml",
+        "icon-16.png" | "icon-32.png" => "image/png",
         _ => "application/octet-stream",
     }
 }
