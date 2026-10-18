@@ -1,6 +1,9 @@
 let state = null;
 let settingsKey = "";
 const cards = new Map();
+const tabs = new Map();
+// The drive index whose card is visible; null until the first snapshot.
+let activeTab = null;
 // Card indices with a request in flight; their action buttons are disabled.
 const pending = new Set();
 // Monotonically increasing; only the newest snapshot may be applied, so an
@@ -84,6 +87,26 @@ function progress(trackState) {
     ).toFixed(1)} MiB`;
   }
   return trackState.detail || "";
+}
+
+// Overall rip progress across the selected tracks: finished tracks count
+// fully, the track being ripped counts its byte fraction, pending count 0.
+function ripProgress(rip) {
+  const selected = new Set(rip.tracks);
+  let units = 0;
+  let done = 0;
+  let finished = 0;
+  for (const trackState of rip.states) {
+    if (!selected.has(trackState.number)) continue;
+    units += 1;
+    if (trackState.status === "ripping" && trackState.total) {
+      done += trackState.done / trackState.total;
+    } else if (trackState.status !== "pending") {
+      done += 1;
+      finished += 1;
+    }
+  }
+  return { finished, units, fraction: units ? done / units : 0 };
 }
 
 function renderSettings() {
@@ -402,6 +425,83 @@ function updateCard(record, drive) {
   updateRipSlot(record, drive);
 }
 
+function tabIndicator(drive) {
+  const rip = drive.rip;
+  if (rip && rip.active) {
+    const { finished, units, fraction } = ripProgress(rip);
+    return {
+      classes: "tab--ripping",
+      html: `<span class="bar"><span class="fill" style="width:${Math.round(
+        fraction * 100
+      )}%"></span></span><span class="tab-count">${finished}/${units}</span>`,
+    };
+  }
+  if (drive.loadingToc || drive.coverFetching || /…$/.test(drive.lookupStatus)) {
+    return { classes: "tab--busy", html: '<span class="spinner"></span>' };
+  }
+  if (rip) {
+    const failed = rip.states.filter((track) => track.status === "failed").length;
+    return failed
+      ? {
+          classes: "tab--failed",
+          html: '<span class="dot dot--failed"></span>',
+        }
+      : { classes: "tab--done", html: '<span class="dot dot--done"></span>' };
+  }
+  return { classes: "", html: "" };
+}
+
+function updateTab(tab, drive) {
+  tab.querySelector(".tab-label").textContent = drive.label;
+  const indicator = tabIndicator(drive);
+  tab.className = `tab ${indicator.classes}`.trim() + (tab.classList.contains("active") ? " active" : "");
+  tab.querySelector(".tab-indicator").innerHTML = indicator.html;
+  tab.title = [drive.status, drive.disc]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function renderTabs() {
+  const bar = $("#tabs");
+  const seen = new Set();
+  state.drives.forEach((drive) => {
+    seen.add(drive.index);
+    let tab = tabs.get(drive.index);
+    if (!tab) {
+      tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "tab";
+      tab.dataset.index = drive.index;
+      tab.setAttribute("role", "tab");
+      tab.innerHTML = `<span class="tab-label"></span><span class="tab-indicator"></span>`;
+      tabs.set(drive.index, tab);
+      bar.appendChild(tab);
+    }
+    updateTab(tab, drive);
+  });
+  for (const [index, tab] of tabs) {
+    if (!seen.has(index)) {
+      tab.remove();
+      tabs.delete(index);
+    }
+  }
+  if (!seen.has(activeTab)) activeTab = null;
+  if (activeTab === null && state.drives.length) {
+    activeTab = state.drives[0].index;
+  }
+  for (const [index, tab] of tabs) {
+    const selected = index === activeTab;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+}
+
+function showActiveCard() {
+  for (const [index, record] of cards) {
+    record.card.classList.toggle("hidden", index !== activeTab);
+  }
+}
+
 function applyRipEvent(driveId, event) {
   if (!state) return;
   const drive = state.drives.find(
@@ -451,6 +551,7 @@ function applyRipEvent(driveId, event) {
 function render() {
   if (!state) return;
   renderSettings();
+  renderTabs();
   const main = $("#drives");
   const seen = new Set();
   state.drives.forEach((drive) => {
@@ -477,9 +578,23 @@ function render() {
       cards.delete(index);
     }
   }
+  showActiveCard();
 }
 
 function bindDelegated() {
+  $("#tabs").addEventListener("click", (event) => {
+    const tab = event.target.closest(".tab");
+    if (!tab) return;
+    const index = Number(tab.dataset.index);
+    if (index === activeTab) return;
+    activeTab = index;
+    showActiveCard();
+    for (const [tabIndex, element] of tabs) {
+      const selected = tabIndex === activeTab;
+      element.classList.toggle("active", selected);
+      element.setAttribute("aria-selected", selected ? "true" : "false");
+    }
+  });
   const main = $("#drives");
   main.addEventListener("click", async (event) => {
     const actionButton = event.target.closest("[data-action]");

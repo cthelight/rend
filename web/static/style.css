@@ -52,9 +52,115 @@ header h1 {
   padding: 0.35rem 0.5rem;
 }
 
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.75rem 1.25rem 0;
+  background: #161a22;
+  border-bottom: 1px solid #2a2f3a;
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  white-space: nowrap;
+  background: #0e1117;
+  border: 1px solid #2a2f3a;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.9rem;
+  color: #c3cbdb;
+}
+
+.tab:hover {
+  background: #1a2130;
+}
+
+.tab.active {
+  background: #151922;
+  border-color: #334562;
+  color: #e8ecf3;
+  font-weight: 600;
+}
+
+.tab-label {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.bar {
+  display: inline-block;
+  width: 64px;
+  height: 5px;
+  border-radius: 3px;
+  background: #223047;
+  overflow: hidden;
+}
+
+.bar .fill {
+  display: block;
+  height: 100%;
+  background: #7aa2ff;
+  transition: width 0.3s ease;
+}
+
+.tab-count {
+  font-size: 0.78rem;
+  color: #9aa4b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.tab--ripping .tab-count {
+  color: #7aa2ff;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #334562;
+  border-top-color: #7aa2ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.dot--done {
+  background: #4ade80;
+}
+
+.dot--failed {
+  background: #f87171;
+}
+
+.hidden {
+  display: none !important;
+}
+
 .drives {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: minmax(0, 1000px);
+  justify-content: center;
   gap: 1rem;
   padding: 1rem 1.25rem;
 }

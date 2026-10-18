@@ -196,12 +196,15 @@ rend-web --demo                # simulated disc, no hardware required
 
 Then open the printed URL, normally <http://127.0.0.1:3000/>.
 
-The page lists discovered drives, loads tables of contents, shows
-MusicBrainz candidate matches and cover art, edits disc and track tags,
-and starts or stops rips. Drive state and per-track rip progress are
-pushed over a server-sent events stream, so the page updates without
-polling. As with the TUI, several drives can rip at the same time, and
-multi-drive rips write to per-device subdirectories of the output path.
+Each discovered drive gets a tab in the tab bar; select one to see its
+table of contents, MusicBrainz candidate matches and cover art, editable
+disc and track tags, and rip controls. The tabs carry live progress
+indicators: a spinner while the TOC or metadata is being read, and a
+progress bar with a track count while a rip is running. Drive state and
+per-track rip progress are pushed over a server-sent events stream, so
+the page updates without polling. As with the TUI, several drives can
+rip at the same time, and multi-drive rips write to per-device
+subdirectories of the output path.
 
 ## Development
 
