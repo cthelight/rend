@@ -10,6 +10,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream;
 use serde::Deserialize;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -17,6 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use rend_encode::Format;
 
 use crate::assets;
+use crate::shutdown_signal;
 use crate::state::{ApiError, AppState};
 use crate::view::{ServerEvent, StateView};
 
@@ -75,18 +77,34 @@ async fn state_view(State(state): State<Arc<AppState>>) -> Json<StateView> {
     Json(state.view())
 }
 
+/// Error emitted by the event stream when the process is shutting down.
+/// Ending the stream with an error lets the in-flight SSE response
+/// complete, so the graceful shutdown can finish instead of waiting on
+/// an endless feed.
+#[derive(Debug)]
+struct Shutdown;
+
+impl std::fmt::Display for Shutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("rend-wui is shutting down")
+    }
+}
+
+impl std::error::Error for Shutdown {}
+
 async fn events(State(state): State<Arc<AppState>>) -> Response {
     let rx = state.events_receiver();
-    let stream =
-        BroadcastStream::new(rx).map(|result| -> Result<Event, std::convert::Infallible> {
-            Ok(match result {
-                Ok(event) => event.to_sse(),
-                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
-                    ServerEvent::Resync { skipped }.to_sse()
-                }
-            })
-        });
-    Sse::new(stream)
+    let events = BroadcastStream::new(rx).map(|result| -> Result<Event, Shutdown> {
+        Ok(match result {
+            Ok(event) => event.to_sse(),
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
+                ServerEvent::Resync { skipped }.to_sse()
+            }
+        })
+    });
+    let shutdown =
+        stream::once(shutdown_signal()).map(|_| -> Result<Event, Shutdown> { Err(Shutdown) });
+    Sse::new(stream::select(events, shutdown))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
 }

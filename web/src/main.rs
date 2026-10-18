@@ -7,6 +7,7 @@ use rend_encode::Format;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 use rend_wui::api::router;
 use rend_wui::state::AppState;
+use rend_wui::{ShutdownCause, shutdown_signal};
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
@@ -72,27 +73,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = router(state.clone());
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async {
+            match shutdown_signal().await {
+                ShutdownCause::Terminate => println!("rend-wui: received SIGTERM"),
+                ShutdownCause::Interrupt => println!("rend-wui: interrupted"),
+            }
+        })
         .await?;
 
     state.shutdown();
     Ok(())
-}
-
-/// Waits for SIGTERM or Ctrl-C so the process can shut down cleanly.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                tokio::select! {
-                    _ = sigterm.recv() => println!("rend-wui: received SIGTERM"),
-                    _ = tokio::signal::ctrl_c() => println!("rend-wui: interrupted"),
-                }
-                return;
-            }
-            Err(error) => eprintln!("rend-wui: cannot catch SIGTERM ({error}); using Ctrl-C"),
-        }
-    }
-    let _ = tokio::signal::ctrl_c().await;
 }
