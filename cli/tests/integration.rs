@@ -88,8 +88,25 @@ fn rip_rejects_unknown_format() {
     bin()
         .args(["rip", "--format", "mpegts"])
         .assert()
-        .code(2)
-        .stderr(contains("unknown format 'mpegts'"));
+        .failure()
+        .stderr(contains("unknown or unavailable format 'mpegts'"));
+}
+
+#[test]
+fn rip_accepts_repeatable_format_flags() {
+    bin()
+        .args([
+            "rip",
+            "-d",
+            "/dev/sr-definitely-not-there",
+            "--format",
+            "wav",
+            "--format",
+            "wav",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("device /dev/sr-definitely-not-there not found"));
 }
 
 #[test]

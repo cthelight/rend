@@ -20,7 +20,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rend_encode::{Format, FormatSet};
+use rend_encode::FormatSet;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 
 mod app;
@@ -49,11 +49,12 @@ struct Cli {
     #[arg(short, long, default_value = ".")]
     output_dir: PathBuf,
 
-    /// Output format (default: the best available format — flac when ffmpeg
-    /// supports it, otherwise wav).
-    #[arg(short = 'F', long = "format", value_parser = Format::parse)]
-    format: Option<Format>,
-    /// Quality for the output format (default: the format's default).
+    /// Output format (repeatable; each value may be `format` or
+    /// `format:quality`; default: the best available format — flac when
+    /// ffmpeg supports it, otherwise wav).
+    #[arg(short = 'F', long = "format", value_name = "FORMAT")]
+    formats: Vec<String>,
+    /// Quality for output formats that do not include an explicit quality.
     #[arg(short = 'q', long = "quality", value_name = "QUALITY")]
     quality: Option<String>,
 
@@ -88,15 +89,15 @@ fn run(cli: &Cli) -> io::Result<()> {
     let template = Template::parse(&cli.template)
         .map_err(|e| io::Error::other(format!("invalid --template: {e}")))?;
     let formats = FormatSet::probe();
-    let format = formats
-        .resolve(cli.format, cli.quality.as_deref())
+    let selected = formats
+        .resolve_many(&cli.formats, cli.quality.as_deref())
         .map_err(io::Error::other)?;
     let mut app = App::new(
         cli.device.as_deref(),
         cli.output_dir.clone(),
         cli.force,
         formats,
-        format,
+        selected,
         template,
         cli.demo,
     );

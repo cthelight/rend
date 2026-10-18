@@ -212,6 +212,19 @@ impl Format {
             .map_err(|_| format!("invalid quality '{s}'"))
     }
 
+    /// Parses a `format` or `format:quality` selection.
+    pub fn parse_selection(s: &str) -> Result<(String, Option<i32>), String> {
+        let (id, quality) = match s.split_once(':') {
+            Some((id, quality)) => (id, Some(Self::parse_quality(quality)?)),
+            None => (s, None),
+        };
+        let id = id.trim().to_ascii_lowercase();
+        if id.is_empty() {
+            return Err(format!("invalid format selection '{s}'"));
+        }
+        Ok((id, quality))
+    }
+
     /// The static description of this format.
     pub fn spec(&self) -> &'static FormatSpec {
         self.spec
@@ -426,6 +439,49 @@ impl FormatSet {
         }
         Ok(next)
     }
+
+    /// Resolves several `format` or `format:quality` selections.
+    ///
+    /// An optional shared quality applies to selections without an explicit
+    /// quality. With no selections the set's default format is used.
+    pub fn resolve_many(
+        &self,
+        selections: &[String],
+        quality: Option<&str>,
+    ) -> Result<Vec<Format>, String> {
+        let shared_quality = quality.map(Format::parse_quality).transpose()?;
+        let mut resolved: Vec<Format> = Vec::new();
+        for selection in selections {
+            let (id, selection_quality) = Format::parse_selection(selection)?;
+            let spec = self.get(&id).ok_or_else(|| {
+                format!(
+                    "unknown or unavailable format '{id}' (available: {})",
+                    self.ids().join(", ")
+                )
+            })?;
+            let quality = selection_quality
+                .or(shared_quality)
+                .unwrap_or(spec.default_quality);
+            let format = Format::from_id(spec.id, Some(quality))?;
+            match resolved
+                .iter_mut()
+                .find(|existing| existing.id() == format.id())
+            {
+                Some(existing) if *existing == format => {}
+                Some(_) => {
+                    return Err(format!(
+                        "format '{}' was selected more than once with different qualities",
+                        format.id()
+                    ));
+                }
+                None => resolved.push(format),
+            }
+        }
+        if resolved.is_empty() {
+            resolved.push(self.default_format());
+        }
+        Ok(resolved)
+    }
 }
 
 /// A track's output file, fed raw PCM as the track is read.
@@ -627,6 +683,78 @@ Encoders:
         let flac = Format::default();
         assert!(set.resolve(Some(flac), None).is_err());
         assert_eq!(set.resolve(None, None).unwrap().id(), "wav");
+    }
+
+    #[test]
+    fn parse_selection_accepts_format_and_quality() {
+        assert_eq!(
+            Format::parse_selection("flac").unwrap(),
+            ("flac".to_string(), None)
+        );
+        assert_eq!(
+            Format::parse_selection("MP3:192").unwrap(),
+            ("mp3".to_string(), Some(192))
+        );
+        assert_eq!(
+            Format::parse_selection("vorbis:q6").unwrap(),
+            ("vorbis".to_string(), Some(6))
+        );
+        assert!(Format::parse_selection("").is_err());
+        assert!(Format::parse_selection(":192").is_err());
+        assert!(Format::parse_selection("mp3:fast").is_err());
+    }
+
+    #[test]
+    fn resolve_many_combines_selections_and_shared_quality() {
+        let set = FormatSet::all();
+        let formats = set
+            .resolve_many(&["mp3:192".into(), "vorbis".into(), "wav".into()], None)
+            .unwrap();
+        assert_eq!(
+            formats.iter().map(|format| format.id()).collect::<Vec<_>>(),
+            vec!["mp3", "vorbis", "wav"]
+        );
+        assert_eq!(
+            formats
+                .iter()
+                .map(|format| format.quality())
+                .collect::<Vec<_>>(),
+            vec![192, 6, 0]
+        );
+
+        let formats = set
+            .resolve_many(&["mp3:192".into(), "opus".into()], Some("320"))
+            .unwrap();
+        assert_eq!(
+            formats
+                .iter()
+                .map(|format| format.quality())
+                .collect::<Vec<_>>(),
+            vec![192, 320]
+        );
+    }
+
+    #[test]
+    fn resolve_many_deduplicates_and_validates_selections() {
+        let set = FormatSet::all();
+        assert_eq!(
+            set.resolve_many(&["mp3".into(), "mp3".into()], None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            set.resolve_many(&["mp3:192".into(), "mp3:320".into()], None)
+                .is_err()
+        );
+        assert!(
+            set.resolve_many(&["flac".into(), "mp3".into()], Some("320"))
+                .is_err()
+        );
+
+        let set = FormatSet::without_ffmpeg();
+        assert!(set.resolve_many(&["flac".into()], None).is_err());
+        assert_eq!(set.resolve_many(&[], None).unwrap()[0].id(), "wav");
     }
 
     #[test]

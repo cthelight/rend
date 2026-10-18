@@ -32,7 +32,7 @@ enum Command {
     Drives,
     /// Show the table of contents of the disc.
     Toc,
-    /// Rip audio tracks to the selected output format (across several drives in parallel).
+    /// Rip audio tracks to the selected output formats (across several drives in parallel).
     Rip {
         #[command(flatten)]
         args: RipArgs,
@@ -57,12 +57,13 @@ struct RipArgs {
     /// Directory to write the track files to.
     #[arg(short, long, default_value = ".")]
     output_dir: PathBuf,
-    /// Output format (default: the best available format — flac when ffmpeg
-    /// supports it, otherwise wav).
-    #[arg(short = 'F', long = "format", value_parser = Format::parse)]
-    format: Option<Format>,
-    /// Quality for the output format (for example flac 0-8, mp3 320, aac
-    /// 256, opus 128, vorbis 6; default: the format's default).
+    /// Output format (repeatable; each value may be `format` or
+    /// `format:quality`; default: the best available format — flac when
+    /// ffmpeg supports it, otherwise wav).
+    #[arg(short = 'F', long = "format", value_name = "FORMAT")]
+    formats: Vec<String>,
+    /// Quality for output formats that do not include an explicit quality
+    /// (for example flac 0-8, mp3 320, aac 256, opus 128, vorbis 6).
     #[arg(short = 'q', long = "quality", value_name = "QUALITY")]
     quality: Option<String>,
     /// Naming template for the track files: `<artist>/<album>/<number>
@@ -297,7 +298,7 @@ fn nth_candidate(candidates: &[Candidate], n: usize) -> Result<&DiscMeta, Error>
 
 /// The options shared by a drive's rip worker and its per-track rips.
 struct RipOptions {
-    format: Format,
+    formats: Vec<Format>,
     template: Template,
     force: bool,
     no_metadata: bool,
@@ -311,7 +312,7 @@ struct RipOptions {
 fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
     let RipArgs {
         output_dir,
-        format,
+        formats,
         quality,
         template,
         tracks,
@@ -321,8 +322,8 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
         r#match,
     } = args;
     let set = FormatSet::probe();
-    let format = set
-        .resolve(*format, quality.as_deref())
+    let formats = set
+        .resolve_many(formats, quality.as_deref())
         .map_err(Error::Unexpected)?;
     let template = Template::parse(template)
         .map_err(|e| Error::Unexpected(format!("invalid --template: {e}")))?;
@@ -353,7 +354,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
                 String::new()
             };
             let opts = RipOptions {
-                format,
+                formats: formats.clone(),
                 template: template.clone(),
                 force: *force,
                 no_metadata: *no_metadata,
@@ -410,7 +411,7 @@ fn cmd_rip(devices: &[String], args: &RipArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/// Rips one drive's selected tracks to `out_dir` in the given format,
+/// Rips one drive's selected tracks to `out_dir` in the given formats,
 /// through the shared rip worker, returning the number of tracks attempted
 /// and how many of them failed.
 fn rip_device(
@@ -473,7 +474,7 @@ fn rip_device(
         toc,
         tracks: selected,
         out_dir: out_dir.to_path_buf(),
-        format: opts.format,
+        formats: opts.formats.clone(),
         template: opts.template.clone(),
         force: opts.force,
         stop: Arc::new(AtomicBool::new(false)),

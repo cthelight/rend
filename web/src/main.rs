@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use rend_encode::{Format, FormatSet};
+use rend_encode::FormatSet;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 use rend_wui::api::router;
 use rend_wui::state::AppState;
@@ -27,11 +27,12 @@ struct Cli {
     #[arg(short = 'o', long, default_value = ".", env = "REND_WUI_OUTPUT_DIR")]
     output_dir: PathBuf,
 
-    /// Output format. Without it, the best installed default is used.
-    #[arg(short = 'F', long, value_parser = Format::parse)]
-    format: Option<Format>,
+    /// Output format, repeatable. Each value may be `format` or `format:quality`.
+    /// Without it, `REND_WUI_FORMATS` or the best installed default is used.
+    #[arg(short = 'F', long)]
+    formats: Vec<String>,
 
-    /// Output quality, e.g. `256`, `256k`, or `q6`.
+    /// Output quality for selected formats that do not include an explicit quality.
     #[arg(short = 'q', long)]
     quality: Option<String>,
 
@@ -61,12 +62,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let template = Template::parse(&cli.template)?;
     let formats = FormatSet::probe();
-    let format = formats.resolve(cli.format, cli.quality.as_deref())?;
+    let selected_formats = if !cli.formats.is_empty() {
+        formats.resolve_many(&cli.formats, cli.quality.as_deref())?
+    } else if let Ok(raw) = std::env::var("REND_WUI_FORMATS") {
+        let selections: Vec<String> = raw
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect();
+        if selections.is_empty() {
+            vec![formats.default_format()]
+        } else {
+            match formats.resolve_many(&selections, None) {
+                Ok(selected) => selected,
+                Err(message) => {
+                    eprintln!("rend-wui: ignoring REND_WUI_FORMATS: {message}");
+                    vec![formats.default_format()]
+                }
+            }
+        }
+    } else {
+        vec![formats.default_format()]
+    };
     let state = AppState::new(
         cli.output_dir,
         cli.device.as_deref(),
         formats,
-        format,
+        selected_formats,
         cli.force,
         template,
         cli.drive_dirs,

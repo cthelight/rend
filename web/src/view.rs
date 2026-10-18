@@ -16,9 +16,6 @@ use serde::Serialize;
 pub struct StateView {
     pub out_dir: String,
     pub formats: Vec<FormatView>,
-    pub format: String,
-    pub quality: i32,
-    pub quality_label: String,
     pub force: bool,
     pub drives: Vec<DriveView>,
 }
@@ -29,6 +26,9 @@ pub struct StateView {
 pub struct FormatView {
     pub id: String,
     pub label: String,
+    pub selected: bool,
+    pub selected_quality: Option<i32>,
+    pub selected_quality_label: Option<String>,
     pub quality_options: Vec<QualityOptionView>,
 }
 
@@ -198,7 +198,7 @@ pub struct RipView {
     pub active: bool,
     pub tracks: Vec<u8>,
     pub out_dir: String,
-    pub format: String,
+    pub formats: Vec<String>,
     pub force: bool,
     pub states: Vec<TrackStateView>,
     pub summary: Option<String>,

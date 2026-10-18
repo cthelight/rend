@@ -477,8 +477,10 @@ pub struct App {
     rips: HashMap<usize, DriveRip>,
     /// The formats available on this machine, in cycle order.
     pub formats: FormatSet,
-    /// The format new rips write in.
-    pub format: Format,
+    /// The formats new rips write in.
+    pub selected_formats: Vec<Format>,
+    /// The format the output-format keys are currently pointing at.
+    pub active_format: Format,
     /// The naming template new rips lay their track files out with.
     pub template: Template,
     pub force: bool,
@@ -496,10 +498,19 @@ impl App {
         out_dir: PathBuf,
         force: bool,
         formats: FormatSet,
-        format: Format,
+        selected_formats: Vec<Format>,
         template: Template,
         demo: bool,
     ) -> Self {
+        let selected_formats = if selected_formats.is_empty() {
+            vec![formats.default_format()]
+        } else {
+            selected_formats
+        };
+        let active_format = selected_formats
+            .first()
+            .copied()
+            .unwrap_or_else(|| formats.default_format());
         let mut app = Self {
             running: true,
             help: false,
@@ -524,7 +535,8 @@ impl App {
             tracks_scroll: 0,
             rips: HashMap::new(),
             formats,
-            format,
+            selected_formats,
+            active_format,
             template,
             force,
             status: None,
@@ -1049,12 +1061,26 @@ impl App {
                 ));
             }
             KeyCode::Char('o') => {
-                self.format = self.formats.next_format(self.format);
-                self.status = Some(format!("output format: {}", self.format.display_label()));
+                self.active_format = self.formats.next_format(self.active_format);
+                self.status = Some(format!(
+                    "active output format: {}",
+                    self.active_format.display_label()
+                ));
             }
+            KeyCode::Char('O') => self.toggle_active_format(),
             KeyCode::Char('Q') => {
-                self.format = self.format.cycle_quality();
-                self.status = Some(format!("output quality: {}", self.format.display_label()));
+                self.active_format = self.active_format.cycle_quality();
+                if let Some(selected) = self
+                    .selected_formats
+                    .iter_mut()
+                    .find(|f| f.id() == self.active_format.id())
+                {
+                    *selected = self.active_format;
+                }
+                self.status = Some(format!(
+                    "output quality: {}",
+                    self.active_format.display_label()
+                ));
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
@@ -1392,7 +1418,13 @@ impl App {
                     } => {
                         if let Some(i) = track_index(&rip.toc, number) {
                             if let Some(slot) = rip.state.states.get_mut(i) {
-                                *slot = TrackState::Done { bytes };
+                                if let TrackState::Done { bytes: prior } = &*slot {
+                                    *slot = TrackState::Done {
+                                        bytes: prior + bytes,
+                                    };
+                                } else {
+                                    *slot = TrackState::Done { bytes };
+                                }
                             }
                         }
                         self.status = Some(format!("track {number:02}: wrote {}", path.display()));
@@ -1601,15 +1633,53 @@ impl App {
         }
     }
 
+    fn toggle_active_format(&mut self) {
+        let active_id = self.active_format.id();
+        match self
+            .selected_formats
+            .iter()
+            .position(|f| f.id() == active_id)
+        {
+            Some(pos) if self.selected_formats.len() > 1 => {
+                self.selected_formats.remove(pos);
+                self.status = Some(format!("output formats: {}", self.format_summary()));
+            }
+            Some(_) => self.status = Some("at least one output format must stay selected".into()),
+            None => {
+                self.selected_formats.push(self.active_format);
+                let order = |f: &Format| {
+                    self.formats
+                        .formats()
+                        .iter()
+                        .position(|s| s.id == f.id())
+                        .unwrap_or(usize::MAX)
+                };
+                self.selected_formats.sort_by_key(order);
+                self.status = Some(format!("output formats: {}", self.format_summary()));
+            }
+        }
+    }
+
+    pub fn format_summary(&self) -> String {
+        self.selected_formats
+            .iter()
+            .map(|format| format.display_label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn start_rip(&mut self, tracks: Vec<u8>) {
         if self.drive_ripping(self.drive_sel) {
             self.status = Some("a rip is already running on this drive".into());
             return;
         }
-        if !self.formats.contains(self.format) {
+        if self
+            .selected_formats
+            .iter()
+            .any(|format| !self.formats.contains(*format))
+        {
             self.status = Some(format!(
-                "{} is not available on this system — press o to switch to {}",
-                self.format.label(),
+                "an output format is not available on this system — press o to switch to {}",
                 self.formats.default_format().label()
             ));
             return;
@@ -1646,7 +1716,7 @@ impl App {
             toc: toc.clone(),
             tracks: tracks.clone(),
             out_dir: out_dir.clone(),
-            format: self.format,
+            formats: self.selected_formats.clone(),
             template: self.template.clone(),
             force: self.force,
             stop: stop.clone(),
@@ -1764,7 +1834,7 @@ mod tests {
             dir.to_path_buf(),
             false,
             formats,
-            Format::default(),
+            vec![Format::default()],
             Template::default(),
             true,
         )
@@ -1999,30 +2069,61 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let formats = FormatSet::new(vec![rend_encode::FLAC, rend_encode::WAV]);
         let mut app = demo_app_with(dir.path(), formats);
-        assert_eq!(app.format, Format::default());
+        assert_eq!(app.selected_formats, vec![Format::default()]);
         app.handle_key(key('o'));
-        assert_eq!(app.format.id(), "wav");
+        assert_eq!(app.active_format.id(), "wav");
         app.handle_key(key('o'));
-        assert_eq!(app.format.id(), "flac");
+        assert_eq!(app.active_format.id(), "flac");
+    }
+
+    #[test]
+    fn output_format_selection_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let formats = FormatSet::new(vec![rend_encode::FLAC, rend_encode::WAV]);
+        let mut app = demo_app_with(dir.path(), formats);
+        let wav = Format::parse("wav").unwrap();
+
+        app.handle_key(key('o'));
+        app.handle_key(key('O'));
+        assert_eq!(app.selected_formats, vec![Format::default(), wav]);
+
+        app.handle_key(key('o'));
+        app.handle_key(key('O'));
+        assert_eq!(app.selected_formats, vec![wav]);
+
+        app.handle_key(key('o'));
+        app.handle_key(key('O'));
+        assert_eq!(app.selected_formats, vec![wav]);
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("at least one output format"))
+        );
     }
 
     #[test]
     fn quality_cycles() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = demo_app(dir.path());
-        app.format = Format::from_id("mp3", Some(320)).unwrap();
+        app.active_format = Format::from_id("mp3", Some(320)).unwrap();
+        app.selected_formats = vec![app.active_format];
         app.handle_key(key('Q'));
-        assert_eq!(app.format.quality(), 128);
-        app.format = Format::default();
+        assert_eq!(app.active_format.quality(), 128);
+        assert_eq!(app.selected_formats[0].quality(), 128);
+
+        app.active_format = Format::default();
+        app.selected_formats = vec![Format::default()];
         app.handle_key(key('Q'));
-        assert_eq!(app.format.quality(), 0);
+        assert_eq!(app.active_format.quality(), 0);
+        assert_eq!(app.selected_formats[0].quality(), 0);
     }
 
     #[test]
     fn rips_in_wav_format_when_selected() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = demo_app(dir.path());
-        app.format = Format::parse("wav").unwrap();
+        app.active_format = Format::parse("wav").unwrap();
+        app.selected_formats = vec![app.active_format];
         app.track_sel = 2;
         app.rip_selected_track();
         drain_until_finished(&mut app, Duration::from_secs(10));
@@ -2041,6 +2142,21 @@ mod tests {
             tag.title().map(std::borrow::Cow::into_owned).as_deref(),
             Some("Short One")
         );
+    }
+
+    #[test]
+    fn rips_in_multiple_formats_when_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        app.selected_formats = vec![Format::default(), Format::parse("wav").unwrap()];
+        app.active_format = Format::default();
+        app.track_sel = 2;
+        app.rip_selected_track();
+        drain_until_finished(&mut app, Duration::from_secs(10));
+
+        let base = dir.path().join("The Demo Band/Demo Album/03 Short One");
+        assert!(base.with_extension("flac").exists());
+        assert!(base.with_extension("wav").exists());
     }
 
     #[test]
@@ -2412,7 +2528,7 @@ mod tests {
             dir.path().to_path_buf(),
             false,
             FormatSet::probe(),
-            Format::default(),
+            vec![Format::default()],
             Template::default(),
             false,
         );

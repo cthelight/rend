@@ -76,8 +76,8 @@ pub struct RipJob {
     pub toc: Toc,
     pub tracks: Vec<u8>,
     pub out_dir: PathBuf,
-    /// The format the track files are written in.
-    pub format: Format,
+    /// The formats each track is written in.
+    pub formats: Vec<Format>,
     /// The naming template the track files are laid out with.
     pub template: Template,
     pub force: bool,
@@ -130,47 +130,63 @@ fn worker(mut job: RipJob, tx: Sender<RipEvent>) {
     .ok();
 }
 
+/// One output file for a track.
+#[derive(Debug, Clone)]
+struct TrackOutput {
+    number: u8,
+    path: PathBuf,
+    format: Format,
+}
+
 /// Everything needed to read and encode a single track.
 struct TrackSpec {
     number: u8,
     lba: u32,
     frames: u32,
-    path: PathBuf,
-    format: Format,
+    outputs: Vec<TrackOutput>,
 }
 
 impl TrackSpec {
     fn new(job: &RipJob, track: &Track, frames: u32) -> Self {
-        // With looked-up metadata the file path comes from the naming
-        // template; without it the flat `trackNN` name is kept.
-        let path = match &job.meta {
-            Some(disc) => {
-                let position = job
-                    .toc
-                    .audio_tracks()
-                    .position(|t| t.number == track.number)
-                    .map(|i| i + 1)
-                    .unwrap_or(1);
-                job.template.track_path(
-                    &job.out_dir,
-                    disc,
-                    track.number,
-                    position,
-                    job.format.extension(),
-                )
-            }
-            None => job.out_dir.join(format!(
-                "track{:02}.{}",
-                track.number,
-                job.format.extension()
-            )),
-        };
+        let outputs = job
+            .formats
+            .iter()
+            .map(|format| {
+                // With looked-up metadata the file path comes from the naming
+                // template; without it the flat `trackNN` name is kept.
+                let path = match &job.meta {
+                    Some(disc) => {
+                        let position = job
+                            .toc
+                            .audio_tracks()
+                            .position(|t| t.number == track.number)
+                            .map(|i| i + 1)
+                            .unwrap_or(1);
+                        job.template.track_path(
+                            &job.out_dir,
+                            disc,
+                            track.number,
+                            position,
+                            format.extension(),
+                        )
+                    }
+                    None => {
+                        job.out_dir
+                            .join(format!("track{:02}.{}", track.number, format.extension()))
+                    }
+                };
+                TrackOutput {
+                    number: track.number,
+                    path,
+                    format: *format,
+                }
+            })
+            .collect();
         Self {
             number: track.number,
             lba: track.start_lba,
             frames,
-            path,
-            format: job.format,
+            outputs,
         }
     }
 }
@@ -183,37 +199,58 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
     let end = job.toc.end_lba(number).unwrap_or(job.toc.leadout_lba);
     let spec = TrackSpec::new(job, track, track.frames(end));
 
-    if spec.path.exists() && !job.force {
-        tx.send(RipEvent::TrackSkipped {
-            number,
-            reason: "output exists (force is off)".into(),
-            path: spec.path.clone(),
-        })
-        .ok();
+    let mut to_write = Vec::new();
+    for output in &spec.outputs {
+        if output.path.exists() && !job.force {
+            tx.send(RipEvent::TrackSkipped {
+                number,
+                reason: "output exists (force is off)".into(),
+                path: output.path.clone(),
+            })
+            .ok();
+        } else {
+            to_write.push(output.clone());
+        }
+    }
+    if to_write.is_empty() {
         return Ok(());
     }
 
-    if let Some(parent) = spec.path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    for output in &to_write {
+        if let Some(parent) = output.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
     }
 
     tx.send(RipEvent::TrackStarted { number }).ok();
-    match read_track(&mut job.source, &spec, tx, &job.stop) {
+    match read_track(
+        &mut job.source,
+        spec.number,
+        spec.lba,
+        spec.frames,
+        &to_write,
+        tx,
+        &job.stop,
+    ) {
         Ok(bytes) => {
-            tag_track(job, &spec);
-            let bytes = std::fs::metadata(&spec.path)
-                .map(|m| m.len())
-                .unwrap_or(bytes);
-            tx.send(RipEvent::TrackDone {
-                number,
-                path: spec.path,
-                bytes,
-            })
-            .ok();
+            for (output, bytes) in to_write.iter().zip(bytes) {
+                tag_track(job, output.number, &output.path);
+                let bytes = std::fs::metadata(&output.path)
+                    .map(|m| m.len())
+                    .unwrap_or(bytes);
+                tx.send(RipEvent::TrackDone {
+                    number: output.number,
+                    path: output.path.clone(),
+                    bytes,
+                })
+                .ok();
+            }
             Ok(())
         }
         Err(e) => {
-            std::fs::remove_file(&spec.path).ok();
+            for output in &to_write {
+                std::fs::remove_file(&output.path).ok();
+            }
             Err(e.to_string())
         }
     }
@@ -221,7 +258,7 @@ fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), 
 
 /// Embeds the looked-up metadata and cover art into a finished track file.
 /// Best effort: a tagging failure never fails the rip.
-fn tag_track(job: &RipJob, spec: &TrackSpec) {
+fn tag_track(job: &RipJob, number: u8, path: &std::path::Path) {
     let Some(disc) = &job.meta else {
         return;
     };
@@ -229,7 +266,7 @@ fn tag_track(job: &RipJob, spec: &TrackSpec) {
     let Some(position) = job
         .toc
         .audio_tracks()
-        .position(|t| t.number == spec.number)
+        .position(|t| t.number == number)
         .map(|i| i + 1)
     else {
         return;
@@ -238,21 +275,35 @@ fn tag_track(job: &RipJob, spec: &TrackSpec) {
         return;
     };
     tags.catalog_number = job.catalog_number.clone();
-    let _ = apply(&spec.path, &tags, job.cover.as_deref());
+    let _ = apply(path, &tags, job.cover.as_deref());
 }
 
 fn read_track(
     source: &mut RipSource,
-    spec: &TrackSpec,
+    number: u8,
+    lba: u32,
+    frames: u32,
+    outputs: &[TrackOutput],
     tx: &Sender<RipEvent>,
     stop: &AtomicBool,
-) -> io::Result<u64> {
-    let mut stream = CddaStream::new(source, spec.lba, spec.frames);
-    let mut file = spec.format.create_file(&spec.path)?;
+) -> io::Result<Vec<u64>> {
+    let mut stream = CddaStream::new(source, lba, frames);
     let total = stream.total_bytes() as u64;
+    let mut writers = Vec::new();
+    for output in outputs {
+        match output.format.create_file(&output.path) {
+            Ok(file) => writers.push((output, file)),
+            Err(error) => {
+                for (created, _) in &writers {
+                    std::fs::remove_file(&created.path).ok();
+                }
+                return Err(error);
+            }
+        }
+    }
+
     let mut buf = vec![0u8; FRAMES_PER_SECOND as usize * FRAME_SIZE];
     let mut done = 0u64;
-
     loop {
         if stop.load(Ordering::Relaxed) {
             return Err(io::Error::new(
@@ -264,18 +315,24 @@ fn read_track(
         if n == 0 {
             break;
         }
-        file.write(&buf[..n])?;
+        for (_, file) in &mut writers {
+            file.write(&buf[..n])?;
+        }
         done += n as u64;
         tx.send(RipEvent::Progress {
-            number: spec.number,
+            number,
             bytes_done: done,
             bytes_total: total,
         })
         .ok();
     }
 
-    file.finish()?;
-    Ok(std::fs::metadata(&spec.path)?.len())
+    let mut bytes = Vec::with_capacity(writers.len());
+    for (output, file) in writers {
+        file.finish()?;
+        bytes.push(std::fs::metadata(&output.path)?.len());
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -289,14 +346,19 @@ mod tests {
 
     use crate::demo::DemoDisc;
 
-    fn run_job(tracks: Vec<u8>, out_dir: PathBuf, force: bool, format: Format) -> Vec<RipEvent> {
+    fn run_job(
+        tracks: Vec<u8>,
+        out_dir: PathBuf,
+        force: bool,
+        formats: Vec<Format>,
+    ) -> Vec<RipEvent> {
         let (tx, rx) = mpsc::channel();
         let job = RipJob {
             source: RipSource::Demo(DemoSource::with_delay(Duration::ZERO)),
             toc: DemoDisc::new().toc,
             tracks,
             out_dir,
-            format,
+            formats,
             template: Template::default(),
             force,
             stop: Arc::new(AtomicBool::new(false)),
@@ -320,7 +382,12 @@ mod tests {
     #[test]
     fn rips_a_demo_track_to_flac_by_default() {
         let dir = tempfile::tempdir().unwrap();
-        let events = run_job(vec![3], dir.path().to_path_buf(), false, Format::default());
+        let events = run_job(
+            vec![3],
+            dir.path().to_path_buf(),
+            false,
+            vec![Format::default()],
+        );
 
         let expected = dir.path().join("track03.flac");
         assert!(expected.exists());
@@ -383,7 +450,7 @@ mod tests {
             vec![3],
             dir.path().to_path_buf(),
             false,
-            Format::parse("wav").unwrap(),
+            vec![Format::parse("wav").unwrap()],
         );
 
         let expected = dir.path().join("track03.wav");
@@ -403,6 +470,39 @@ mod tests {
     }
 
     #[test]
+    fn rips_a_demo_track_to_multiple_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = run_job(
+            vec![3],
+            dir.path().to_path_buf(),
+            false,
+            vec![Format::default(), Format::parse("wav").unwrap()],
+        );
+
+        let flac = dir.path().join("track03.flac");
+        let wav = dir.path().join("track03.wav");
+        assert!(flac.exists());
+        assert!(wav.exists());
+
+        let started = events
+            .iter()
+            .filter(|event| matches!(event, RipEvent::TrackStarted { number: 3, .. }))
+            .count();
+        assert_eq!(started, 1);
+
+        let done_paths = events
+            .iter()
+            .filter_map(|event| match event {
+                RipEvent::TrackDone { number, path, .. } if *number == 3 => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(done_paths.contains(&flac));
+        assert!(done_paths.contains(&wav));
+        assert_eq!(done_paths.len(), 2);
+    }
+
+    #[test]
     fn tags_the_file_when_the_job_carrying_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -411,7 +511,7 @@ mod tests {
             toc: DemoDisc::new().toc,
             tracks: vec![3],
             out_dir: dir.path().to_path_buf(),
-            format: Format::default(),
+            formats: vec![Format::default()],
             template: Template::default(),
             force: false,
             stop: Arc::new(AtomicBool::new(false)),
@@ -453,7 +553,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("track03.flac"), b"old").unwrap();
 
-        let events = run_job(vec![3], dir.path().to_path_buf(), false, Format::default());
+        let events = run_job(
+            vec![3],
+            dir.path().to_path_buf(),
+            false,
+            vec![Format::default()],
+        );
 
         assert!(
             events
@@ -475,7 +580,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("track03.flac"), b"old").unwrap();
 
-        let events = run_job(vec![3], dir.path().to_path_buf(), true, Format::default());
+        let events = run_job(
+            vec![3],
+            dir.path().to_path_buf(),
+            true,
+            vec![Format::default()],
+        );
 
         assert!(
             events
@@ -489,7 +599,12 @@ mod tests {
     #[test]
     fn unknown_track_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let events = run_job(vec![9], dir.path().to_path_buf(), false, Format::default());
+        let events = run_job(
+            vec![9],
+            dir.path().to_path_buf(),
+            false,
+            vec![Format::default()],
+        );
 
         assert!(
             events

@@ -392,7 +392,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .unwrap_or(app.out_dir.as_path())
         .display()
         .to_string();
-    let mut title = format!(" Ripping to {out_display} · {}", app.format.display_label());
+    let mut title = format!(" Ripping to {out_display} · {}", app.format_summary());
     if app.force {
         title.push_str(" · force on");
     }
@@ -532,7 +532,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_help(f: &mut Frame) {
     let area = f.area();
     let width = 54u16.min(area.width.saturating_sub(2));
-    let height = 19u16.min(area.height.saturating_sub(2));
+    let height = 20u16.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -556,8 +556,9 @@ fn draw_help(f: &mut Frame) {
         ("t", "edit the disc's tags"),
         ("u", "show the register disc id URL"),
         ("e", "eject the disc"),
-        ("o", "cycle the output format"),
-        ("Q", "cycle the output quality"),
+        ("o", "cycle the active output format"),
+        ("O", "toggle the active output format"),
+        ("Q", "cycle the active output quality"),
         ("f", "toggle force (overwrite)"),
         ("s", "stop the selected rip"),
         ("?", "show or close this help"),
@@ -915,7 +916,7 @@ mod tests {
             dir.to_path_buf(),
             false,
             FormatSet::all(),
-            Format::default(),
+            vec![Format::default()],
             Template::default(),
             true,
         )

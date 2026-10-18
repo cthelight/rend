@@ -15,8 +15,6 @@ use serde::Deserialize;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use rend_encode::Format;
-
 use crate::assets;
 use crate::shutdown_signal;
 use crate::state::{ApiError, AppState};
@@ -113,9 +111,7 @@ async fn events(State(state): State<Arc<AppState>>) -> Response {
 #[serde(rename_all = "camelCase")]
 struct SettingsRequest {
     #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    quality: Option<i32>,
+    formats: Option<Vec<String>>,
     #[serde(default)]
     force: Option<bool>,
 }
@@ -124,18 +120,8 @@ async fn update_settings(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SettingsRequest>,
 ) -> Response {
-    if let Some(raw) = req.format {
-        match Format::parse(&raw) {
-            Ok(format) => {
-                if let Err(error) = state.set_format(format) {
-                    return error_response(error);
-                }
-            }
-            Err(message) => return error_response(ApiError::bad(message)),
-        }
-    }
-    if let Some(quality) = req.quality {
-        if let Err(error) = state.set_quality(quality) {
+    if let Some(formats) = req.formats {
+        if let Err(error) = state.set_formats(formats) {
             return error_response(error);
         }
     }

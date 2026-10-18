@@ -124,7 +124,7 @@ pub struct RipControl {
     pub stopped: bool,
     pub tracks: Vec<u8>,
     pub out_dir: PathBuf,
-    pub format: Format,
+    pub formats: Vec<Format>,
     pub force: bool,
     pub toc: Toc,
     pub states: Vec<RipTrackState>,
@@ -144,15 +144,25 @@ pub struct RipTrackState {
 #[derive(Debug)]
 pub enum TrackState {
     Pending,
-    Ripping { done: u64, total: u64 },
-    Done { bytes: u64 },
+    Ripping {
+        done: u64,
+        total: u64,
+        outputs_done: usize,
+        expected_outputs: usize,
+        skipped_outputs: usize,
+        bytes: u64,
+        started: bool,
+    },
+    Done {
+        bytes: u64,
+    },
     Skipped(String),
     Failed(String),
 }
 
 #[derive(Debug)]
 struct Settings {
-    format: Format,
+    formats: Vec<Format>,
     force: bool,
     template: Template,
 }
@@ -187,7 +197,7 @@ impl AppState {
         out_dir: PathBuf,
         device: Option<&str>,
         formats: FormatSet,
-        format: Format,
+        selected_formats: Vec<Format>,
         force: bool,
         template: Template,
         drive_dirs: Option<bool>,
@@ -211,7 +221,7 @@ impl AppState {
             drives: Mutex::new(drives),
             cache: Mutex::new(MetaCache::new()),
             settings: Mutex::new(Settings {
-                format,
+                formats: selected_formats,
                 force,
                 template,
             }),
@@ -380,9 +390,16 @@ impl AppState {
                         }
                     })
                     .collect();
+                let selected = settings
+                    .formats
+                    .iter()
+                    .find(|format| format.id() == spec.id.to_string().as_str());
                 FormatView {
                     id: spec.id.to_string(),
                     label: spec.label.to_string(),
+                    selected: selected.is_some(),
+                    selected_quality: selected.map(|format| format.quality()),
+                    selected_quality_label: selected.map(|format| format.quality_label()),
                     quality_options,
                 }
             })
@@ -390,9 +407,6 @@ impl AppState {
         StateView {
             out_dir: self.out_dir.to_string_lossy().into_owned(),
             formats,
-            format: settings.format.id().to_string(),
-            quality: settings.format.quality(),
-            quality_label: settings.format.quality_label(),
             force: settings.force,
             drives: drives
                 .iter()
@@ -406,36 +420,27 @@ impl AppState {
         self.events.subscribe()
     }
 
-    pub fn set_format(&self, format: Format) -> Result<(), ApiError> {
-        if !self.formats.contains(format) {
-            return Err(ApiError::bad(format!(
-                "output format '{}' is not available on this system",
-                format.id()
-            )));
+    pub fn set_formats(&self, selections: Vec<String>) -> Result<(), ApiError> {
+        if selections.is_empty() {
+            return Err(ApiError::bad("select at least one output format"));
         }
+        let formats = self
+            .formats
+            .resolve_many(&selections, None)
+            .map_err(ApiError::bad)?;
         let changed = {
             let mut settings = self.settings_guard();
-            let changed = settings.format != format;
-            settings.format = format;
+            let changed = settings.formats != formats;
+            settings.formats = formats.clone();
             changed
         };
         if changed {
-            self.emit_log(format!("output format set to {}", format.display_label()));
-        }
-        Ok(())
-    }
-
-    pub fn set_quality(&self, quality: i32) -> Result<(), ApiError> {
-        let current = self.settings_guard().format;
-        let format = current.with_quality(quality).map_err(ApiError::bad)?;
-        let changed = {
-            let mut settings = self.settings_guard();
-            let changed = settings.format != format;
-            settings.format = format;
-            changed
-        };
-        if changed {
-            self.emit_log(format!("output quality set to {}", format.quality_label()));
+            let labels = formats
+                .iter()
+                .map(|format| format.display_label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.emit_log(format!("output formats set to {labels}"));
         }
         Ok(())
     }
@@ -604,9 +609,13 @@ impl AppState {
     }
 
     pub fn rip(&self, index: usize, requested: Vec<u8>) -> Result<(), ApiError> {
-        let (format, force, template) = {
+        let (formats, force, template) = {
             let settings = self.settings_guard();
-            (settings.format, settings.force, settings.template.clone())
+            (
+                settings.formats.clone(),
+                settings.force,
+                settings.template.clone(),
+            )
         };
         let (path, demo, toc, tracks, out_dir, meta, cover, mcn) = {
             let drives = self.drives_guard();
@@ -640,11 +649,10 @@ impl AppState {
                     )));
                 }
             }
-            if !self.formats.contains(format) {
-                return Err(ApiError::bad(format!(
-                    "output format '{}' is not available on this system",
-                    format.id()
-                )));
+            if formats.is_empty() || formats.iter().any(|format| !self.formats.contains(*format)) {
+                return Err(ApiError::bad(
+                    "at least one available output format is required",
+                ));
             }
             let per_drive = self.drive_dirs.unwrap_or(drives.len() > 1);
             let out_dir = if per_drive {
@@ -695,7 +703,7 @@ impl AppState {
                 stopped: false,
                 tracks: tracks.clone(),
                 out_dir: out_dir.clone(),
-                format,
+                formats: formats.clone(),
                 force,
                 toc: toc.clone(),
                 states,
@@ -725,7 +733,7 @@ impl AppState {
             toc,
             tracks,
             out_dir,
-            format,
+            formats,
             template,
             force,
             stop: stop.clone(),
@@ -1529,7 +1537,24 @@ impl RipControl {
         match event {
             RipEvent::TrackStarted { number } => {
                 if let Some(i) = index_of(*number) {
-                    self.states[i].state = TrackState::Ripping { done: 0, total: 0 };
+                    let (skipped_outputs, outputs_done, bytes) = match &self.states[i].state {
+                        TrackState::Ripping {
+                            skipped_outputs,
+                            outputs_done,
+                            bytes,
+                            ..
+                        } => (*skipped_outputs, *outputs_done, *bytes),
+                        _ => (0, 0, 0),
+                    };
+                    self.states[i].state = TrackState::Ripping {
+                        done: 0,
+                        total: 0,
+                        outputs_done,
+                        expected_outputs: self.formats.len().saturating_sub(skipped_outputs),
+                        skipped_outputs,
+                        bytes,
+                        started: true,
+                    };
                 }
             }
             RipEvent::Progress {
@@ -1538,17 +1563,36 @@ impl RipControl {
                 bytes_total,
             } => {
                 if let Some(i) = index_of(*number) {
-                    if matches!(self.states[i].state, TrackState::Ripping { .. }) {
-                        self.states[i].state = TrackState::Ripping {
-                            done: *bytes_done,
-                            total: *bytes_total,
-                        };
+                    if let TrackState::Ripping {
+                        ref mut done,
+                        ref mut total,
+                        ..
+                    } = self.states[i].state
+                    {
+                        *done = *bytes_done;
+                        *total = *bytes_total;
                     }
                 }
             }
-            RipEvent::TrackDone { number, bytes, .. } => {
+            RipEvent::TrackDone {
+                number,
+                bytes: event_bytes,
+                ..
+            } => {
                 if let Some(i) = index_of(*number) {
-                    self.states[i].state = TrackState::Done { bytes: *bytes };
+                    if let TrackState::Ripping {
+                        ref mut outputs_done,
+                        expected_outputs,
+                        ref mut bytes,
+                        ..
+                    } = self.states[i].state
+                    {
+                        *outputs_done += 1;
+                        *bytes += *event_bytes;
+                        if expected_outputs > 0 && *outputs_done >= expected_outputs {
+                            self.states[i].state = TrackState::Done { bytes: *bytes };
+                        }
+                    }
                 }
             }
             RipEvent::TrackFailed { number, error } => {
@@ -1558,7 +1602,38 @@ impl RipControl {
             }
             RipEvent::TrackSkipped { number, reason, .. } => {
                 if let Some(i) = index_of(*number) {
-                    self.states[i].state = TrackState::Skipped(reason.clone());
+                    let (skipped_outputs, outputs_done, expected_outputs, bytes, started) =
+                        match &self.states[i].state {
+                            TrackState::Ripping {
+                                skipped_outputs,
+                                outputs_done,
+                                expected_outputs,
+                                bytes,
+                                started,
+                                ..
+                            } => (
+                                *skipped_outputs,
+                                *outputs_done,
+                                *expected_outputs,
+                                *bytes,
+                                *started,
+                            ),
+                            _ => (0, 0, self.formats.len(), 0, false),
+                        };
+                    let skipped_outputs = skipped_outputs + 1;
+                    self.states[i].state = if skipped_outputs >= self.formats.len() {
+                        TrackState::Skipped(reason.clone())
+                    } else {
+                        TrackState::Ripping {
+                            done: 0,
+                            total: 0,
+                            outputs_done,
+                            expected_outputs,
+                            skipped_outputs,
+                            bytes,
+                            started,
+                        }
+                    };
                 }
             }
             RipEvent::Finished { stopped, .. } => {
@@ -1603,7 +1678,11 @@ impl RipControl {
             active: self.active,
             tracks: self.tracks.clone(),
             out_dir: self.out_dir.to_string_lossy().into_owned(),
-            format: self.format.display_label(),
+            formats: self
+                .formats
+                .iter()
+                .map(|format| format.display_label())
+                .collect(),
             force: self.force,
             states: self.states.iter().map(RipTrackState::view).collect(),
             summary: self.summary.clone(),
@@ -1615,7 +1694,7 @@ impl RipTrackState {
     fn view(&self) -> TrackStateView {
         let (status, detail, done, total) = match &self.state {
             TrackState::Pending => ("pending".to_string(), None, 0, 0),
-            TrackState::Ripping { done, total } => ("ripping".to_string(), None, *done, *total),
+            TrackState::Ripping { done, total, .. } => ("ripping".to_string(), None, *done, *total),
             TrackState::Done { bytes } => (
                 "done".to_string(),
                 Some(human_bytes(*bytes)),
@@ -1727,7 +1806,7 @@ mod tests {
             dir.to_path_buf(),
             None,
             FormatSet::without_ffmpeg(),
-            Format::parse("wav").unwrap(),
+            vec![Format::parse("wav").unwrap()],
             force,
             Template::default(),
             drive_dirs,
@@ -1777,7 +1856,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             FormatSet::all(),
-            Format::parse("wav").unwrap(),
+            vec![Format::parse("wav").unwrap()],
             false,
             Template::default(),
             None,
@@ -1785,14 +1864,25 @@ mod tests {
         )
         .unwrap();
 
-        state.set_format(Format::parse("flac").unwrap()).unwrap();
-        state.set_quality(5).unwrap();
+        assert!(state.set_formats(Vec::new()).is_err());
+        state.set_formats(vec!["flac:5".to_string()]).unwrap();
         state.set_force(true);
 
         let view = state.view();
-        assert_eq!(view.format, "flac");
-        assert_eq!(view.quality, 5);
-        assert_eq!(view.quality_label, "5");
+        let flac = view
+            .formats
+            .iter()
+            .find(|format| format.id == "flac")
+            .unwrap();
+        assert!(flac.selected);
+        assert_eq!(flac.selected_quality, Some(5));
+        assert_eq!(flac.selected_quality_label.as_deref(), Some("5"));
+        let wav = view
+            .formats
+            .iter()
+            .find(|format| format.id == "wav")
+            .unwrap();
+        assert!(!wav.selected);
         assert!(view.force);
     }
 
@@ -2085,7 +2175,7 @@ mod tests {
                 stopped: false,
                 tracks: vec![1],
                 out_dir: dir.path().to_path_buf(),
-                format: Format::parse("wav").unwrap(),
+                formats: vec![Format::parse("wav").unwrap()],
                 force: false,
                 toc: DemoDisc::new().toc,
                 states: vec![RipTrackState {

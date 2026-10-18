@@ -29,6 +29,7 @@ rend toc                       # show disc table of contents
 rend rip                       # rip all audio tracks to ./<artist>/<album>/<NN> <title>.flac
 rend rip -t 3 -t 5 -o ~/rips   # rip selected tracks to a directory
 rend rip -f                    # overwrite existing files
+rend rip -F flac -F mp3:192    # output FLAC and 192 kbps MP3 copies
 rend rip -F mp3 -q 192         # output MP3 at 192 kbps
 rend rip -F wav                # output WAV
 rend rip --no-metadata         # rip without looking up or tagging metadata
@@ -54,18 +55,23 @@ underscore, a period, or a dash is replaced with `_`. When no metadata is found 
 `--no-metadata` is passed), the flat `trackNN.<ext>` naming is used
 instead. Progress is reported on stderr.
 
-### Output format
+### Output formats
 
 `rend` discovers the available output formats at startup. WAV is always
 available; the ffmpeg-backed formats — FLAC, MP3, AAC/M4A, Opus, and
-Vorbis/OGG — are enabled when their encoder is installed. Without an
-explicit `-F/--format`, the first available format in that preference
-order is used.
+Vorbis/OGG — are enabled when their encoder is installed.
 
-Quality is selected with `-q/--quality` (for example `192`, `192k`, or
-`q6`). The quality scale depends on the format: FLAC uses compression
-levels 0–8, Vorbis uses quality 0–10, and MP3/AAC/Opus use bitrates.
-`-F wav` writes raw 16-bit stereo 44.1 kHz WAV and has no quality option.
+`-F/--format` may be given repeatedly. Each value is either `format` or
+`format:quality`, so `-F flac -F mp3:192` rips every selected track to
+both FLAC and 192 kbps MP3. Without an explicit `-F/--format`, the first
+available format in the preference order is used.
+
+Quality may also be shared with `-q/--quality` (for example `192`,
+`192k`, or `q6`); it applies to selected formats that do not already
+include an explicit `:quality`. The quality scale depends on the format:
+FLAC uses compression levels 0–8, Vorbis uses quality 0–10, and
+MP3/AAC/Opus use bitrates. `-F wav` writes raw 16-bit stereo 44.1 kHz WAV
+and has no quality option.
 
 The encode step lives in `rend-encode`, a self-contained layer so further
 formats can be added without touching the CLI or TUI. A rip in a format
@@ -130,7 +136,7 @@ table of contents, and watching rips in real time:
 rend-tui                       # use the first CD-ROM device
 rend-tui -d /dev/sr1           # use a specific device
 rend-tui -o ~/rips -f          # rip to ~/rips, overwriting existing files
-rend-tui -F mp3 -q 192         # rip to MP3 at 192 kbps
+rend-tui -F flac -F mp3:192    # rip to FLAC and 192 kbps MP3
 rend-tui -F wav                # rip to WAV
 rend-tui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-tui --demo                # simulated disc, no hardware required
@@ -150,8 +156,9 @@ Keyboard:
 | `u`              | show the register disc id URL   |
 | `e`              | eject the disc                  |
 | `f`              | toggle force (overwrite)        |
-| `o`              | cycle the output format         |
-| `Q`              | cycle the output quality        |
+| `o`              | cycle the active output format  |
+| `O`              | toggle the active format in/out |
+| `Q`              | cycle the active format's quality |
 | `s`              | stop the current rip            |
 | `?`              | toggle the keybinds window      |
 | `q`/`esc`        | quit                            |
@@ -201,7 +208,7 @@ and ripping flows:
 rend-wui                       # use the first CD-ROM device
 rend-wui -d /dev/sr1           # use a specific device
 rend-wui -o ~/rips -f          # rip to ~/rips, overwriting existing files
-rend-wui -F mp3 -q 192         # rip to MP3 at 192 kbps
+rend-wui -F flac -F mp3:192    # rip to FLAC and 192 kbps MP3
 rend-wui -F wav                # rip to WAV
 rend-wui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-wui --demo                # simulated disc, no hardware required
@@ -213,6 +220,8 @@ The rip settings also read the environment, handy when running `rend-wui`
 as a service:
 
 - `REND_WUI_OUTPUT_DIR` — where the ripped files are written (`-o`)
+- `REND_WUI_FORMATS` — comma-separated starting output formats, each
+  `format` or `format:quality` (for example `flac,mp3:192`)
 - `REND_WUI_TEMPLATE` — the naming template (`-T`)
 - `REND_WUI_DRIVE_DIRS` — `true` or `false`: always or never rip each
   drive into its own subdirectory of the output dir. Without it, drives
@@ -220,8 +229,9 @@ as a service:
 
 A flag given on the command line overrides the environment.
 
-The settings bar shows every output format the server can serve, and a
-quality selector when the selected format has one.
+The settings bar shows every output format the server can serve as
+toggles. Selected formats that have quality options also get a quality
+selector.
 
 Each discovered drive gets a tab in the tab bar; select one to see its
 table of contents, MusicBrainz candidate matches and cover art, editable

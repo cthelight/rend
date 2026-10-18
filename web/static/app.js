@@ -169,55 +169,72 @@ function statePill(status) {
   }
 }
 
+function selectedFormats() {
+  return state.formats.filter((format) => format.selected);
+}
+
+function formatSelection(format) {
+  return format.selectedQuality === null || format.selectedQuality === undefined
+    ? format.id
+    : `${format.id}:${format.selectedQuality}`;
+}
+
+function selectedFormatSelections() {
+  return selectedFormats().map(formatSelection);
+}
+
 function renderSettings() {
   const key = [
-    state.format,
-    state.quality,
     state.force,
     state.outDir,
     state.formats
-      .map((format) => `${format.id}:${format.qualityOptions.map((o) => o.value).join(",")}`)
+      .map(
+        (format) =>
+          `${format.id}:${format.selected ? formatSelection(format) : "-"}:${format.qualityOptions
+            .map((option) => option.value)
+            .join(",")}`
+      )
       .join("|"),
   ].join(":");
   if (settingsKey === key) return;
   settingsKey = key;
 
-  const currentFormat = state.formats.find((format) => format.id === state.format);
-  const qualityOptions = currentFormat?.qualityOptions ?? [];
-  const settings = $("#settings");
-  settings.innerHTML = `
-    <span class="chip" title="output directory">
-      <span>out</span>
-      <span class="chip-text">${escapeHtml(state.outDir)}</span>
-    </span>
-    <div class="seg" role="group" aria-label="output format">
-      ${state.formats
-        .map(
-          (format) => `
-      <button type="button" class="seg-btn ${state.format === format.id ? "active" : ""}" data-format="${format.id}">
-        ${escapeHtml(format.label)}
-      </button>`
-        )
-        .join("")}
-    </div>
-    ${
-      qualityOptions.length
-        ? `
+  const qualityControls = selectedFormats()
+    .filter((format) => format.qualityOptions.length)
+    .map(
+      (format) => `
     <label class="quality">
-      <span>quality</span>
-      <select id="quality">
-        ${qualityOptions
+      <span>${escapeHtml(format.label)} quality</span>
+      <select data-quality-for="${format.id}">
+        ${format.qualityOptions
           .map(
             (option) => `
-        <option value="${option.value}" ${state.quality === option.value ? "selected" : ""}>
+        <option value="${option.value}" ${format.selectedQuality === option.value ? "selected" : ""}>
           ${escapeHtml(option.label)}
         </option>`
           )
           .join("")}
       </select>
     </label>`
-        : ""
-    }
+    )
+    .join("");
+  const settings = $("#settings");
+  settings.innerHTML = `
+    <span class="chip" title="output directory">
+      <span>out</span>
+      <span class="chip-text">${escapeHtml(state.outDir)}</span>
+    </span>
+    <div class="seg" role="group" aria-label="output formats">
+      ${state.formats
+        .map(
+          (format) => `
+      <button type="button" class="seg-btn ${format.selected ? "active" : ""}" data-format="${format.id}">
+        ${escapeHtml(format.label)}
+      </button>`
+        )
+        .join("")}
+    </div>
+    ${qualityControls}
     <label class="switch" title="overwrite existing files">
       <input type="checkbox" id="force" ${state.force ? "checked" : ""}>
       <span class="switch-track" aria-hidden="true"></span>
@@ -225,8 +242,7 @@ function renderSettings() {
     </label>
   `;
 
-  const force = $("#force");
-  force.addEventListener("change", async (event) => {
+  $("#force").addEventListener("change", async (event) => {
     const previous = state.force;
     const seq = ++snapshotSeq;
     try {
@@ -237,16 +253,23 @@ function renderSettings() {
     }
   });
 
-  const quality = $("#quality");
-  if (quality) {
-    quality.addEventListener("change", async (event) => {
-      const previous = state.quality;
+  for (const select of settings.querySelectorAll("[data-quality-for]")) {
+    select.addEventListener("change", async (event) => {
+      const format = state.formats.find((candidate) => candidate.id === select.dataset.qualityFor);
+      const previous = format?.selectedQuality;
+      const formats = state.formats
+        .filter((candidate) => candidate.selected)
+        .map((candidate) => {
+          const quality = candidate.id === select.dataset.qualityFor
+            ? Number(event.target.value)
+            : candidate.selectedQuality;
+          return quality === null || quality === undefined
+            ? candidate.id
+            : `${candidate.id}:${quality}`;
+        });
       const seq = ++snapshotSeq;
       try {
-        applySnapshot(
-          seq,
-          await post("/api/settings", { quality: Number(event.target.value) })
-        );
+        applySnapshot(seq, await post("/api/settings", { formats }));
       } catch (error) {
         addLog(error.message);
         event.target.value = previous;
@@ -576,7 +599,7 @@ function updateRipSlot(record, drive) {
       </div>`;
   }
   slot.querySelector(".rip-meta").textContent = [
-    `${rip.format} → ${rip.outDir}`,
+    `${(rip.formats ?? []).join(", ")} → ${rip.outDir}`,
     rip.force ? "(force)" : "",
   ]
     .filter(Boolean)
@@ -828,11 +851,18 @@ function bindDelegated() {
   settings.addEventListener("click", async (event) => {
     const button = event.target.closest(".seg-btn");
     if (!button) return;
-    const format = button.dataset.format;
-    if (format === state.format) return;
+    const format = state.formats.find((candidate) => candidate.id === button.dataset.format);
+    if (!format) return;
+    if (format.selected && selectedFormats().length === 1) {
+      addLog("keep at least one output format selected");
+      return;
+    }
+    const formats = state.formats
+      .filter((candidate) => (candidate.id === format.id ? !format.selected : candidate.selected))
+      .map(formatSelection);
     const seq = ++snapshotSeq;
     try {
-      applySnapshot(seq, await post("/api/settings", { format }));
+      applySnapshot(seq, await post("/api/settings", { formats }));
     } catch (error) {
       addLog(error.message);
     }
