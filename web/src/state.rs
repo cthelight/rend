@@ -39,6 +39,10 @@ pub struct AppState {
     settings: Mutex<Settings>,
     events: broadcast::Sender<ServerEvent>,
     out_dir: PathBuf,
+    /// Whether every drive rips into its own subdirectory of `out_dir`.
+    /// `None` keeps the default: per-drive subdirectories only when
+    /// several drives are present.
+    drive_dirs: Option<bool>,
     ffmpeg: bool,
     meta_tx: Mutex<mpsc::Sender<MetaEvent>>,
     meta_rx: Mutex<Option<mpsc::Receiver<MetaEvent>>>,
@@ -185,6 +189,7 @@ impl AppState {
         format: Format,
         force: bool,
         template: Template,
+        drive_dirs: Option<bool>,
         demo: bool,
     ) -> Result<Arc<Self>, String> {
         let ffmpeg = ffmpeg_available();
@@ -212,6 +217,7 @@ impl AppState {
             }),
             events,
             out_dir,
+            drive_dirs,
             ffmpeg,
             meta_tx: Mutex::new(meta_tx),
             meta_rx: Mutex::new(Some(meta_rx)),
@@ -586,7 +592,8 @@ impl AppState {
             if format.requires_ffmpeg() && !self.ffmpeg {
                 return Err(ApiError::bad("ffmpeg is required for flac output"));
             }
-            let out_dir = if drives.len() > 1 {
+            let per_drive = self.drive_dirs.unwrap_or(drives.len() > 1);
+            let out_dir = if per_drive {
                 let name = drive.path.rsplit('/').next().unwrap_or("drive").to_string();
                 self.out_dir.join(name)
             } else {
@@ -1658,12 +1665,17 @@ mod tests {
     use std::path::Path;
 
     fn demo_state(dir: &Path, force: bool) -> Arc<AppState> {
+        demo_state_with(dir, force, None)
+    }
+
+    fn demo_state_with(dir: &Path, force: bool, drive_dirs: Option<bool>) -> Arc<AppState> {
         AppState::new(
             dir.to_path_buf(),
             None,
             Format::Wav,
             force,
             Template::default(),
+            drive_dirs,
             true,
         )
         .expect("demo state constructs")
@@ -1801,6 +1813,34 @@ mod tests {
         assert!(!rip.active);
         assert!(rip.summary.is_some());
         assert!(rip.summary.as_ref().unwrap().contains("ripped"));
+    }
+
+    #[test]
+    fn drive_dirs_on_rips_into_a_per_drive_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state_with(dir.path(), true, Some(true));
+
+        state.rip(0, vec![3]).unwrap();
+        wait_idle(&state, 0);
+
+        let path = dir
+            .path()
+            .join("sr-demo/The_Demo_Band/Demo_Album/03_Short_One.wav");
+        assert!(path.exists());
+        assert!(!dir.path().join("The_Demo_Band").exists());
+    }
+
+    #[test]
+    fn drive_dirs_off_keeps_the_flat_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state_with(dir.path(), true, Some(false));
+
+        state.rip(0, vec![3]).unwrap();
+        wait_idle(&state, 0);
+
+        let path = dir.path().join("The_Demo_Band/Demo_Album/03_Short_One.wav");
+        assert!(path.exists());
+        assert!(!dir.path().join("sr-demo").exists());
     }
 
     #[test]

@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 base64 = { workspace = true }
 rust-embed = { version = "8", features = ["debug-embed"] }
 

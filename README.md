@@ -196,6 +196,17 @@ rend-wui --demo                # simulated disc, no hardware required
 
 Then open the printed URL, normally <http://127.0.0.1:3000/>.
 
+The rip settings also read the environment, handy when running `rend-wui`
+as a service:
+
+- `REND_WUI_OUTPUT_DIR` — where the ripped files are written (`-o`)
+- `REND_WUI_TEMPLATE` — the naming template (`-T`)
+- `REND_WUI_DRIVE_DIRS` — `true` or `false`: always or never rip each
+  drive into its own subdirectory of the output dir. Without it, drives
+  get their own subdirectory only when several rip at once
+
+A flag given on the command line overrides the environment.
+
 Each discovered drive gets a tab in the tab bar; select one to see its
 table of contents, MusicBrainz candidate matches and cover art, editable
 disc and track tags, and rip controls. The tabs carry live progress

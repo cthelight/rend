@@ -23,7 +23,7 @@ struct Cli {
     device: Option<String>,
 
     /// Where to write the ripped files.
-    #[arg(short = 'o', long, default_value = ".")]
+    #[arg(short = 'o', long, default_value = ".", env = "REND_WUI_OUTPUT_DIR")]
     output_dir: PathBuf,
 
     /// Output format: flac or wav.
@@ -31,8 +31,16 @@ struct Cli {
     format: Format,
 
     /// Filename template, e.g. `<artist>/<album>/<number> <title>`.
-    #[arg(short = 'T', long, default_value = DEFAULT_TEMPLATE)]
+    #[arg(short = 'T', long, default_value = DEFAULT_TEMPLATE, env = "REND_WUI_TEMPLATE")]
     template: String,
+
+    /// Rip every drive into its own subdirectory of the output dir.
+    ///
+    /// Takes an optional `true` or `false` (bare `--drive-dirs` means on).
+    /// Without it, drives get their own subdirectory only when several
+    /// rip at once.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", env = "REND_WUI_DRIVE_DIRS")]
+    drive_dirs: Option<bool>,
 
     /// Overwrite existing output files.
     #[arg(short = 'f', long)]
@@ -53,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.format,
         cli.force,
         template,
+        cli.drive_dirs,
         cli.demo,
     )?;
 
