@@ -1856,11 +1856,11 @@ mod tests {
         // original candidate's.
         let flac = dir
             .path()
-            .join("The_Demo_Band/Demo_Album__Reissue_/03_Short_One__Reprise_.flac");
+            .join("The Demo Band/Demo Album _Reissue_/03 Short One _Reprise_.flac");
         assert!(flac.exists());
         assert!(
             !dir.path()
-                .join("The_Demo_Band/Demo_Album/03_Short_One.flac")
+                .join("The Demo Band/Demo Album/03 Short One.flac")
                 .exists()
         );
     }
@@ -1879,7 +1879,7 @@ mod tests {
         assert!(state.summary.is_some());
         let flac = dir
             .path()
-            .join("The_Demo_Band/Demo_Album/03_Short_One.flac");
+            .join("The Demo Band/Demo Album/03 Short One.flac");
         let bytes = std::fs::read(&flac).unwrap();
         assert_eq!(&bytes[0..4], b"fLaC");
 
@@ -1937,12 +1937,12 @@ mod tests {
         // directories.
         assert!(
             dir.path()
-                .join("sr-demo/The_Demo_Band/Demo_Album/03_Short_One.flac")
+                .join("sr-demo/The Demo Band/Demo Album/03 Short One.flac")
                 .exists()
         );
         assert!(
             dir.path()
-                .join("sr-demo2/The_Demo_Band/Demo_Album/03_Short_One.flac")
+                .join("sr-demo2/The Demo Band/Demo Album/03 Short One.flac")
                 .exists()
         );
     }
@@ -1952,7 +1952,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let existing = dir
             .path()
-            .join("The_Demo_Band/Demo_Album/03_Short_One.flac");
+            .join("The Demo Band/Demo Album/03 Short One.flac");
         std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
         std::fs::write(&existing, b"old").unwrap();
         let mut app = demo_app(dir.path());
@@ -1998,7 +1998,7 @@ mod tests {
         app.rip_selected_track();
         drain_until_finished(&mut app, Duration::from_secs(10));
 
-        let wav = dir.path().join("The_Demo_Band/Demo_Album/03_Short_One.wav");
+        let wav = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
         let bytes = std::fs::read(&wav).unwrap();
         // A RIFF container whose ID3v2 tag rides in a trailing `ID3 ` chunk.
         assert_eq!(&bytes[0..4], b"RIFF");
@@ -2171,8 +2171,8 @@ mod tests {
         drain_until_finished(&mut app, Duration::from_secs(10));
 
         // The rip is named after the hand-entered artist, album, and the
-        // default track title: <out>/My_Artist/My_Album/03_Track_3.flac.
-        let flac = dir.path().join("My_Artist/My_Album/03_Track_3.flac");
+        // default track title: <out>/My Artist/My Album/03 Track 3.flac.
+        let flac = dir.path().join("My Artist/My Album/03 Track 3.flac");
         assert!(flac.exists());
         let file = lofty::read_from_path(&flac).unwrap();
         let tag = file.tag(lofty::tag::TagType::VorbisComments).unwrap();
@@ -2206,7 +2206,7 @@ mod tests {
 
         let flac = dir
             .path()
-            .join("The_Demo_Band/Renamed_Album/03_Short_One__Edit_.flac");
+            .join("The Demo Band/Renamed Album/03 Short One _Edit_.flac");
         assert!(flac.exists());
         let file = lofty::read_from_path(&flac).unwrap();
         let tag = file.tag(lofty::tag::TagType::VorbisComments).unwrap();
@@ -2488,7 +2488,7 @@ mod tests {
         assert!(app.selected_rip_state().unwrap().summary.is_some());
         assert!(
             dir.path()
-                .join("The_Demo_Band/Demo_Album/03_Short_One.flac")
+                .join("The Demo Band/Demo Album/03 Short One.flac")
                 .exists()
         );
     }

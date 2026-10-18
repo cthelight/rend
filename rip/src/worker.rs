@@ -420,7 +420,7 @@ mod tests {
 
         let path = dir
             .path()
-            .join("The_Demo_Band/Demo_Album/03_Short_One.flac");
+            .join("The Demo Band/Demo Album/03 Short One.flac");
         let file = lofty::read_from_path(&path).unwrap();
         let tag = file
             .tag(lofty::tag::TagType::VorbisComments)

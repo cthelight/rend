@@ -6,8 +6,8 @@
 //! per-album directory as `<NN> <title>.<ext>`: the release artist's
 //! directory, the album's directory, the track's number zero-padded to two
 //! digits, a space, and the title. Every name component is sanitized: any
-//! character that is not alphanumeric, an underscore, a period, or a dash
-//! is replaced with `_`, so the names stay safe on SMB shares.
+//! character that is not alphanumeric, a space, an underscore, a period,
+//! or a dash is replaced with `_`, so the names stay safe on SMB shares.
 
 use std::path::{Path, PathBuf};
 
@@ -209,21 +209,21 @@ fn parse_part(part: &str) -> Result<Vec<Segment>, ParseError> {
     Ok(segments)
 }
 
-/// Replaces every character that is not alphanumeric, an underscore, a
-/// period, or a dash with `_`. Trailing dots are dropped, since Windows
-/// silently removes them.
+/// Replaces every character that is not alphanumeric, a space, an
+/// underscore, a period, or a dash with `_`. Trailing dots and spaces are
+/// dropped, since Windows silently removes them.
 pub fn sanitize(name: &str) -> String {
     let mut out: String = name
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '_' | '.' | '-') {
+            if c.is_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-') {
                 c
             } else {
                 '_'
             }
         })
         .collect();
-    while out.ends_with('.') {
+    while out.ends_with('.') || out.ends_with(' ') {
         out.pop();
     }
     out
@@ -255,8 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_keeps_alphanumerics_underscores_dots_and_dashes() {
-        assert_eq!(sanitize("a-b.c_d E"), "a-b.c_d_E");
+    fn sanitize_keeps_alphanumerics_spaces_underscores_dots_and_dashes() {
+        assert_eq!(sanitize("a-b.c_d E"), "a-b.c_d E");
         assert_eq!(sanitize("0123456789"), "0123456789");
     }
 
@@ -266,11 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_replaces_spaces_and_every_quote() {
-        assert_eq!(sanitize("it's \"fine\""), "it_s__fine_");
+    fn sanitize_replaces_every_quote_but_keeps_spaces() {
+        assert_eq!(sanitize("it's \"fine\""), "it_s _fine_");
         assert_eq!(
             sanitize("curly ‘quotes’ and “double”"),
-            "curly__quotes__and__double_"
+            "curly _quotes_ and _double_"
         );
     }
 
@@ -280,9 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_drops_trailing_dots() {
+    fn sanitize_drops_trailing_dots_and_spaces() {
         assert_eq!(sanitize("dots..."), "dots");
-        assert_eq!(sanitize("dots. ."), "dots._");
+        assert_eq!(sanitize("dots. ."), "dots");
+        assert_eq!(sanitize("trail  "), "trail");
     }
 
     #[test]
@@ -298,11 +299,11 @@ mod tests {
         let template = Template::default();
         assert_eq!(
             template.track_path(Path::new("out"), &disc(), 1, 1, "flac"),
-            PathBuf::from("out/The_Band/The_Album/01_First_Song.flac")
+            PathBuf::from("out/The Band/The Album/01 First Song.flac")
         );
         assert_eq!(
             template.track_path(Path::new("out"), &disc(), 10, 1, "wav"),
-            PathBuf::from("out/The_Band/The_Album/10_First_Song.wav")
+            PathBuf::from("out/The Band/The Album/10 First Song.wav")
         );
     }
 
@@ -313,7 +314,7 @@ mod tests {
         d.tracks[0].artist = Some("Solo Artist".into());
         assert_eq!(
             template.track_path(Path::new("out"), &d, 3, 1, "wav"),
-            PathBuf::from("out/2024/The_Album/Solo_Artist/03-First_Song.wav")
+            PathBuf::from("out/2024/The Album/Solo Artist/03-First Song.wav")
         );
     }
 
@@ -322,13 +323,13 @@ mod tests {
         let template = Template::parse("<album-artist>/<number> <title>").unwrap();
         assert_eq!(
             template.track_path(Path::new("out"), &disc(), 1, 1, "flac"),
-            PathBuf::from("out/The_Band/01_First_Song.flac")
+            PathBuf::from("out/The Band/01 First Song.flac")
         );
         let mut d = disc();
         d.album_artist = Some("Various".into());
         assert_eq!(
             template.track_path(Path::new("out"), &d, 1, 1, "flac"),
-            PathBuf::from("out/Various/01_First_Song.flac")
+            PathBuf::from("out/Various/01 First Song.flac")
         );
     }
 
@@ -337,13 +338,13 @@ mod tests {
         let template = Template::parse("<track-artist>/<number> <title>").unwrap();
         assert_eq!(
             template.track_path(Path::new("out"), &disc(), 1, 1, "flac"),
-            PathBuf::from("out/The_Band/01_First_Song.flac")
+            PathBuf::from("out/The Band/01 First Song.flac")
         );
         let mut d = disc();
         d.tracks[0].artist = Some("Guest Artist".into());
         assert_eq!(
             template.track_path(Path::new("out"), &d, 1, 1, "flac"),
-            PathBuf::from("out/Guest_Artist/01_First_Song.flac")
+            PathBuf::from("out/Guest Artist/01 First Song.flac")
         );
     }
 
@@ -354,7 +355,7 @@ mod tests {
         d.year = None;
         assert_eq!(
             template.track_path(Path::new("out"), &d, 1, 1, "flac"),
-            PathBuf::from("out/The_Band/01_First_Song.flac")
+            PathBuf::from("out/The Band/01 First Song.flac")
         );
     }
 
@@ -364,7 +365,7 @@ mod tests {
         d.tracks[0].title = "   ".into();
         assert_eq!(
             Template::default().track_path(Path::new("out"), &d, 1, 1, "flac"),
-            PathBuf::from("out/The_Band/The_Album/01_Unknown.flac")
+            PathBuf::from("out/The Band/The Album/01 Unknown.flac")
         );
     }
 

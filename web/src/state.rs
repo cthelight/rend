@@ -1803,7 +1803,7 @@ mod tests {
         state.rip(0, vec![3]).unwrap();
         wait_idle(&state, 0);
 
-        let path = dir.path().join("The_Demo_Band/Demo_Album/03_Short_One.wav");
+        let path = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");
@@ -1825,9 +1825,9 @@ mod tests {
 
         let path = dir
             .path()
-            .join("sr-demo/The_Demo_Band/Demo_Album/03_Short_One.wav");
+            .join("sr-demo/The Demo Band/Demo Album/03 Short One.wav");
         assert!(path.exists());
-        assert!(!dir.path().join("The_Demo_Band").exists());
+        assert!(!dir.path().join("The Demo Band").exists());
     }
 
     #[test]
@@ -1838,7 +1838,7 @@ mod tests {
         state.rip(0, vec![3]).unwrap();
         wait_idle(&state, 0);
 
-        let path = dir.path().join("The_Demo_Band/Demo_Album/03_Short_One.wav");
+        let path = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
         assert!(path.exists());
         assert!(!dir.path().join("sr-demo").exists());
     }

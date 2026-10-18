@@ -41,14 +41,14 @@ rend -d /dev/sr1 toc           # use a specific device (default: first found)
 
 Ripped files are named after the looked-up metadata when it is available:
 each track goes into a per-artist, per-album directory as
-`<NN> <title>.<ext>` (e.g. `~/rips/The_Band/The_Album/01_First_Song.flac`).
+`<NN> <title>.<ext>` (e.g. `~/rips/The Band/The Album/01 First Song.flac`).
 The layout follows a naming template — `<artist>/<album>/<number> <title>`
 by default, overridable with `-T`/`--template`, with the tokens
 `<artist>`, `<album>`, `<album-artist>`, `<year>`, `<number>`, `<title>`,
 and `<track-artist>` (the last component is the file name; a component
 that expands to nothing, like a missing year, is dropped). Every component
-is sanitized: any character that is not alphanumeric, an underscore, a
-period, or a dash is replaced with `_`. When no metadata is found (or
+is sanitized: any character that is not alphanumeric, a space, an
+underscore, a period, or a dash is replaced with `_`. When no metadata is found (or
 `--no-metadata` is passed), the flat `trackNN.<ext>` naming is used
 instead. Progress is reported on stderr.
 
