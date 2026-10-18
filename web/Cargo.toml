@@ -1,12 +1,12 @@
 [package]
-name = "rend-web"
+name = "rend-wui"
 description = "Web UI for rend: a CD ripper server with a built-in frontend"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "rend-web"
+name = "rend-wui"
 path = "src/main.rs"
 
 [dependencies]

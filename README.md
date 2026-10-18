@@ -18,7 +18,7 @@ around the Linux `cdrom` ioctl interface.
 - `meta/` — `rend-meta`: MusicBrainz disc lookup and tag writing (lofty)
 - `cli/` — `rend`: the command-line interface
 - `tui/` — `rend-tui`: an interactive TUI with mouse support
-- `web/` — `rend-web`: a browser UI with live progress over SSE
+- `web/` — `rend-wui`: a browser UI with live progress over SSE
 
 ## Usage
 
@@ -182,16 +182,16 @@ collide.
 
 ## Web
 
-`rend-web` serves a single-page browser UI for the same drive, metadata,
+`rend-wui` serves a single-page browser UI for the same drive, metadata,
 and ripping flows:
 
 ```sh
-rend-web                       # use the first CD-ROM device
-rend-web -d /dev/sr1           # use a specific device
-rend-web -o ~/rips -f          # rip to ~/rips, overwriting existing files
-rend-web -F wav                # rip to WAV instead of FLAC
-rend-web -T '<year>/<album>/<number> <title>'   # custom naming template
-rend-web --demo                # simulated disc, no hardware required
+rend-wui                       # use the first CD-ROM device
+rend-wui -d /dev/sr1           # use a specific device
+rend-wui -o ~/rips -f          # rip to ~/rips, overwriting existing files
+rend-wui -F wav                # rip to WAV instead of FLAC
+rend-wui -T '<year>/<album>/<number> <title>'   # custom naming template
+rend-wui --demo                # simulated disc, no hardware required
 ```
 
 Then open the printed URL, normally <http://127.0.0.1:3000/>.
@@ -215,9 +215,9 @@ make test       # run the test suite
 make lint       # fmt check and clippy, warnings denied
 ```
 
-`make install` installs `rend`, `rend-tui`, and `rend-web` to
+`make install` installs `rend`, `rend-tui`, and `rend-wui` to
 `~/.local/bin` (`make install-cli`, `make install-tui`, or
-`make install-web` for just one of them), and `make uninstall` removes
+`make install-wui` for just one of them), and `make uninstall` removes
 them. The targets are thin wrappers around
 `cargo` — override with `CARGO=…` if needed — and `make help` lists
 the full set.

@@ -1,4 +1,4 @@
-//! rend-web: a small HTTP server that serves rend's ripper behind a
+//! rend-wui: a small HTTP server that serves rend's ripper behind a
 //! single-page frontend.
 //!
 //! The frontend is plain HTML/CSS/JavaScript embedded in the binary at

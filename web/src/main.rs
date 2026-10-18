@@ -1,16 +1,16 @@
-//! `rend-web`: serve the rend web UI and rip through the shared worker.
+//! `rend-wui`: serve the rend web UI and rip through the shared worker.
 
 use std::path::PathBuf;
 
 use clap::Parser;
 use rend_encode::Format;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
-use rend_web::api::router;
-use rend_web::state::AppState;
+use rend_wui::api::router;
+use rend_wui::state::AppState;
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
-#[command(name = "rend-web", about = "Serve the rend web UI")]
+#[command(name = "rend-wui", about = "Serve the rend web UI")]
 struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bind before starting the background thread so a busy port fails fast.
     let listener = TcpListener::bind((cli.host.as_str(), cli.port)).await?;
     state.start();
-    println!("rend-web listening on http://{}:{}/", cli.host, cli.port);
+    println!("rend-wui listening on http://{}:{}/", cli.host, cli.port);
 
     let app = router(state.clone());
     axum::serve(listener, app)
@@ -77,12 +77,12 @@ async fn shutdown_signal() {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut sigterm) => {
                 tokio::select! {
-                    _ = sigterm.recv() => println!("rend-web: received SIGTERM"),
-                    _ = tokio::signal::ctrl_c() => println!("rend-web: interrupted"),
+                    _ = sigterm.recv() => println!("rend-wui: received SIGTERM"),
+                    _ = tokio::signal::ctrl_c() => println!("rend-wui: interrupted"),
                 }
                 return;
             }
-            Err(error) => eprintln!("rend-web: cannot catch SIGTERM ({error}); using Ctrl-C"),
+            Err(error) => eprintln!("rend-wui: cannot catch SIGTERM ({error}); using Ctrl-C"),
         }
     }
     let _ = tokio::signal::ctrl_c().await;

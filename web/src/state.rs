@@ -286,7 +286,7 @@ impl AppState {
         self.arm_meta();
         let state = self.arc();
         let handle = std::thread::Builder::new()
-            .name("rend-web".into())
+            .name("rend-wui".into())
             .spawn(move || state.run())
             .expect("failed to spawn the web state thread");
         *self.tick_guard() = Some(handle);
@@ -683,7 +683,7 @@ impl AppState {
         let state = self.arc();
         let rip_path = path.clone();
         let forwarder = std::thread::Builder::new()
-            .name(format!("rend-web-rip-{}", index))
+            .name(format!("rend-wui-rip-{}", index))
             .spawn(move || state.forward_rip(index, rip_path, worker_rx))
             .expect("failed to spawn the rip forwarder");
         {
@@ -774,7 +774,7 @@ impl AppState {
         self.drive_changed(index);
         let tx = self.meta_tx_guard().clone();
         let spawned = std::thread::Builder::new()
-            .name(format!("rend-web-toc-{index}"))
+            .name(format!("rend-wui-toc-{index}"))
             .spawn(move || {
                 let result = read_toc(&path);
                 tx.send(MetaEvent::TocRead {
@@ -847,7 +847,7 @@ impl AppState {
         let tx = self.meta_tx_guard().clone();
         let disc_for_thread = disc.clone();
         let spawned = std::thread::Builder::new()
-            .name(format!("rend-web-lookup-{index}"))
+            .name(format!("rend-wui-lookup-{index}"))
             .spawn(move || {
                 let result = lookup_candidates(&disc_for_thread).map_err(|e| e.to_string());
                 tx.send(MetaEvent::Candidates {
@@ -916,7 +916,7 @@ impl AppState {
         };
         let tx = self.meta_tx_guard().clone();
         let spawned = std::thread::Builder::new()
-            .name(format!("rend-web-cover-{index}"))
+            .name(format!("rend-wui-cover-{index}"))
             .spawn(move || {
                 let result = cover_art(&release_id).map_err(|e| e.to_string());
                 tx.send(MetaEvent::Cover {
