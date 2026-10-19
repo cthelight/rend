@@ -25,7 +25,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::vertical([
         Constraint::Min(4),
-        Constraint::Length(5),
+        Constraint::Length(6),
         Constraint::Length(1),
     ])
     .split(area);
@@ -392,7 +392,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .unwrap_or(app.out_dir.as_path())
         .display()
         .to_string();
-    let mut title = format!(" Ripping to {out_display} · {}", app.format_summary());
+    let mut title = format!(" Ripping to {out_display}");
     if app.force {
         title.push_str(" · force on");
     }
@@ -405,8 +405,16 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(inner);
+
+    // Every available format, so the selected ones and the one the o/O/Q
+    // keys point at are always visible, not just in the status line.
+    f.render_widget(
+        Paragraph::new(formats_line(app, inner.width as usize)),
+        slices[0],
+    );
 
     let (done, total) = app.rip_totals();
     let ratio = if total > 0 {
@@ -443,7 +451,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
             .ratio(ratio)
             .label(label)
             .gauge_style(Style::default().fg(gauge_color)),
-        slices[0],
+        slices[1],
     );
 
     let speed = rip.map(|s| s.speed).unwrap_or(0.0);
@@ -465,7 +473,7 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
     };
     f.render_widget(
         Paragraph::new(stats).style(Style::default().fg(Color::Gray)),
-        slices[1],
+        slices[2],
     );
 
     // The buttons are clickable, so they carry no keybind hints; the keys
@@ -486,9 +494,9 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         .map(|(label, _, _)| label.len() as u16 + 6)
         .collect();
     let row_width: u16 = slots.iter().sum::<u16>() + 2 * (buttons.len() - 1) as u16;
-    let mut x = slices[2].x + (slices[2].width.saturating_sub(row_width)) / 2;
+    let mut x = slices[3].x + (slices[3].width.saturating_sub(row_width)) / 2;
     for ((label, enabled, hover), slot) in buttons.iter().zip(slots.iter()) {
-        let rect = Rect::new(x, slices[2].y, *slot, 1);
+        let rect = Rect::new(x, slices[3].y, *slot, 1);
         draw_button(f, rect, label, *enabled, app.hover == *hover);
         match hover {
             Hover::RipSelected => regions.rip_selected = rect,
@@ -500,6 +508,64 @@ fn draw_rip(f: &mut Frame, app: &mut App, area: Rect, regions: &mut Regions) {
         }
         x += slot + 2;
     }
+}
+
+/// The rip panel's format row: every available format in cycle order. A
+/// `✓` marks the formats a rip will be written in, a `▸` marks the one the
+/// `o`/`O`/`Q` keys point at (bold cyan), and the selected ones carry the
+/// quality they will be written at. The keybind hint sits on the right,
+/// only when the panel is wide enough for it.
+fn formats_line(app: &App, width: usize) -> Line<'static> {
+    let hint = "o cycle · O toggle · Q quality";
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, spec) in app.formats.formats().iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
+        }
+        let selected = app
+            .selected_formats
+            .iter()
+            .find(|format| format.id() == spec.id);
+        let active = app.active_format.id() == spec.id;
+        let label = selected
+            .map(|format| format.display_label())
+            .or_else(|| active.then(|| app.active_format.display_label()))
+            .unwrap_or_else(|| spec.label.to_string());
+        let marker = if active {
+            "▸"
+        } else if selected.is_some() {
+            "✓"
+        } else {
+            " "
+        };
+        let style = if active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if selected.is_some() {
+            Style::default()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(format!("{marker} {label}"), style));
+    }
+    let left: String = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>()
+        .concat();
+    let room = width.saturating_sub(left.chars().count());
+    let hint_len = hint.chars().count();
+    // A single space separates the hint from the formats; the repeat count
+    // is the extra padding beyond that gap. `hint_len < room` guarantees
+    // `room - hint_len - 1` is non-negative.
+    if hint_len < room {
+        spans.push(Span::styled(
+            format!("{} {hint}", " ".repeat(room - hint_len - 1)),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1112,6 +1178,81 @@ mod tests {
         assert!(!plain.contains("[r]"));
         assert!(!plain.contains("[a]"));
         assert!(!plain.contains("press r"));
+    }
+
+    #[test]
+    fn formats_line_marks_selection_and_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let mp3 = Format::from_id("mp3", Some(192)).unwrap();
+        app.selected_formats = vec![Format::default(), mp3];
+        app.active_format = mp3;
+
+        let line = formats_line(&app, 100);
+        let spans: Vec<&Span> = line.spans.iter().collect();
+        let text: String = spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(text.contains("✓ flac 8"), "got: {text}");
+        assert!(text.contains("▸ mp3 192k"), "got: {text}");
+        // A format that is neither selected nor pointed at shows only its
+        // name, dimmed, with no quality of its own.
+        assert!(text.contains("  wav"), "got: {text}");
+        assert!(!text.contains("aac 256k"), "got: {text}");
+
+        let active = spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("mp3"))
+            .unwrap();
+        assert_eq!(active.style.fg, Some(Color::Cyan));
+        assert!(active.style.add_modifier.contains(Modifier::BOLD));
+        let unselected = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "  wav")
+            .unwrap();
+        assert_eq!(unselected.style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn formats_line_hints_fit_only_in_wide_panels() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = demo_app(dir.path());
+        let wide_text: String = formats_line(&app, 200)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(
+            wide_text.contains("o cycle · O toggle · Q quality"),
+            "got: {wide_text}"
+        );
+        let narrow_text: String = formats_line(&app, 40)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(!narrow_text.contains("o cycle"), "got: {narrow_text}");
+    }
+
+    #[test]
+    fn the_rip_panel_lists_every_available_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = demo_app(dir.path());
+        let mp3 = Format::from_id("mp3", Some(192)).unwrap();
+        app.selected_formats = vec![Format::default(), mp3];
+        app.active_format = mp3;
+
+        let plain = rendered(&mut app);
+        for name in ["flac 8", "mp3 192k", "aac", "opus", "vorbis", "wav"] {
+            assert!(plain.contains(name), "missing {name}");
+        }
+        assert!(plain.contains('▸'));
+        assert!(plain.contains('✓'));
+        assert!(plain.contains("o cycle · O toggle · Q quality"));
     }
 
     #[test]

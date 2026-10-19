@@ -122,11 +122,19 @@ header h1 {
 
 .seg {
   display: inline-flex;
-  gap: 2px;
+  align-items: stretch;
+  gap: 4px;
   background: var(--inset);
   border: 1px solid var(--border);
   border-radius: 9px;
   padding: 2px;
+}
+
+/* One format: its toggle, with the quality selector fused on the right
+   when the format is selected and has quality options. */
+.fmt {
+  display: inline-flex;
+  align-items: stretch;
 }
 
 .seg-btn {
@@ -151,22 +159,26 @@ header h1 {
   box-shadow: inset 0 0 0 1px var(--border);
 }
 
-.quality {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.85rem;
-  color: var(--text-2);
+.seg-btn--grouped {
+  border-radius: 7px 0 0 7px;
 }
 
-.quality select {
-  background: var(--inset);
-  color: var(--text);
+.fmt-select {
+  background: var(--panel-2);
+  color: var(--text-2);
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 0.32rem 0.5rem;
-  font-size: 0.85rem;
+  border-left: none;
+  border-radius: 0 7px 7px 0;
+  padding: 0.32rem 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
   font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.fmt-select:hover {
+  color: var(--text);
 }
 
 .switch {

@@ -199,6 +199,12 @@ with the CLI, multi-drive rips write
 to per-device subdirectories of the output path so track numbers never
 collide.
 
+The rip panel's first line lists every available format at a glance: the
+active format (the one `o`, `O`, and `Q` act on) is marked with `▸` and
+bolded, selected formats carry a `✓` and their chosen quality, and the
+rest are dimmed to their name alone. When the panel is wide enough the
+`o cycle · O toggle · Q quality` hint is right-aligned on the same line.
+
 ## Web
 
 `rend-wui` serves a single-page browser UI for the same drive, metadata,
@@ -230,8 +236,9 @@ as a service:
 A flag given on the command line overrides the environment.
 
 The settings bar shows every output format the server can serve as
-toggles. Selected formats that have quality options also get a quality
-selector.
+toggles. A selected format that has quality options grows a quality
+selector attached to its toggle, so a format and its quality are chosen
+together in one control.
 
 Each discovered drive gets a tab in the tab bar; select one to see its
 table of contents, MusicBrainz candidate matches and cover art, editable

@@ -199,24 +199,39 @@ function renderSettings() {
   if (settingsKey === key) return;
   settingsKey = key;
 
-  const qualityControls = selectedFormats()
-    .filter((format) => format.qualityOptions.length)
-    .map(
-      (format) => `
-    <label class="quality">
-      <span>${escapeHtml(format.label)} quality</span>
-      <select data-quality-for="${format.id}">
-        ${format.qualityOptions
-          .map(
-            (option) => `
-        <option value="${option.value}" ${format.selectedQuality === option.value ? "selected" : ""}>
-          ${escapeHtml(option.label)}
-        </option>`
-          )
-          .join("")}
-      </select>
-    </label>`
-    )
+  // Each format is a toggle; a selected format that has quality options
+  // grows a quality selector attached to its toggle, so the quality always
+  // sits right next to the format it applies to.
+  const formatGroups = state.formats
+    .map((format) => {
+      const quality = format.qualityOptions.find(
+        (option) => option.value === format.selectedQuality
+      );
+      const grouped = format.selected && format.qualityOptions.length > 0;
+      const title = format.selected
+        ? `Rip to ${format.label.toUpperCase()}${quality ? ` at ${quality.label}` : ""}`
+        : `Add ${format.label.toUpperCase()} output`;
+      const select = grouped
+          ? `
+        <select class="fmt-select" data-quality-for="${format.id}" aria-label="${escapeHtml(format.label)} quality">
+          ${format.qualityOptions
+            .map(
+              (option) => `
+          <option value="${option.value}" ${format.selectedQuality === option.value ? "selected" : ""}>
+            ${escapeHtml(option.label)}
+          </option>`
+            )
+            .join("")}
+        </select>`
+          : "";
+      return `
+      <span class="fmt">
+        <button type="button" class="seg-btn ${grouped ? "seg-btn--grouped" : ""} ${format.selected ? "active" : ""}" data-format="${format.id}" title="${escapeHtml(title)}">
+          ${escapeHtml(format.label)}
+        </button>
+        ${select}
+      </span>`;
+    })
     .join("");
   const settings = $("#settings");
   settings.innerHTML = `
@@ -225,16 +240,8 @@ function renderSettings() {
       <span class="chip-text">${escapeHtml(state.outDir)}</span>
     </span>
     <div class="seg" role="group" aria-label="output formats">
-      ${state.formats
-        .map(
-          (format) => `
-      <button type="button" class="seg-btn ${format.selected ? "active" : ""}" data-format="${format.id}">
-        ${escapeHtml(format.label)}
-      </button>`
-        )
-        .join("")}
+      ${formatGroups}
     </div>
-    ${qualityControls}
     <label class="switch" title="overwrite existing files">
       <input type="checkbox" id="force" ${state.force ? "checked" : ""}>
       <span class="switch-track" aria-hidden="true"></span>
