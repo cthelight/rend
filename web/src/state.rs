@@ -17,8 +17,8 @@ use axum::http::StatusCode;
 use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
 use rend_encode::{Format, FormatSet, QualityKind};
 use rend_meta::{
-    Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
-    register_disc_id_url,
+    Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, fetch_image,
+    lookup_candidates, register_disc_id_url, sniff_mime,
 };
 use rend_rip::demo::{
     DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta_all,
@@ -110,6 +110,10 @@ pub struct Drive {
     /// snapshot so building one only bumps a reference.
     pub cover_data: Option<Arc<String>>,
     pub cover_fetching: bool,
+    /// True when `cover` was supplied by the user (paste, file, or URL)
+    /// rather than fetched from the Cover Art Archive. While set, the
+    /// archive's art must not replace it.
+    pub cover_custom: bool,
     pub meta_edited: bool,
     pub rip: Option<RipControl>,
     /// Bumped before every background read; stale results are dropped.
@@ -514,8 +518,12 @@ impl AppState {
             }
             drive.match_sel = pos.rem_euclid(drive.candidates.len());
             drive.meta = Some(drive.candidates[drive.match_sel].meta.clone());
-            drive.set_cover(None);
-            drive.cover_fetching = false;
+            // A cover the user chose outlives a match switch; only reset the
+            // archive's when none was set.
+            if !drive.cover_custom {
+                drive.set_cover(None);
+                drive.cover_fetching = false;
+            }
             drive.meta_edited = false;
             if drive.candidates.len() > 1 {
                 drive.lookup_status = format!(
@@ -525,6 +533,74 @@ impl AppState {
                     if drive.meta_edited { " (edited)" } else { "" }
                 );
             }
+            drive
+                .meta
+                .as_ref()
+                .map(|meta| meta.release_id.clone())
+                .filter(|release_id| !release_id.is_empty())
+        };
+        self.drive_changed(index);
+        if let Some(release_id) = release_id {
+            self.fetch_cover(index, release_id);
+        }
+        Ok(())
+    }
+
+    /// Replaces the drive's cover with user-supplied bytes and marks it
+    /// custom, so later MusicBrainz lookups don't replace it.
+    pub fn set_custom_cover(&self, index: usize, bytes: Vec<u8>) -> Result<(), ApiError> {
+        if sniff_mime(&bytes).is_none() {
+            return Err(ApiError::bad(
+                "the data is not a recognised image (png, jpeg, gif or bmp)",
+            ));
+        }
+        {
+            let mut drives = self.drives_guard();
+            let Some(drive) = drives.get_mut(index) else {
+                return Err(ApiError::not_found("unknown drive"));
+            };
+            if drive.rip.as_ref().is_some_and(|rip| rip.active) {
+                return Err(ApiError::conflict("stop the rip before changing the cover"));
+            }
+            drive.cover_custom = true;
+            drive.cover_fetching = false;
+            drive.set_cover(Some(bytes));
+        }
+        self.drive_changed(index);
+        Ok(())
+    }
+
+    /// Fetches the image at `url` and applies it as the drive's custom cover.
+    ///
+    /// Blocking: run it on a worker thread.
+    pub fn set_custom_cover_url(&self, index: usize, url: String) -> Result<(), ApiError> {
+        let bytes = match fetch_image(&url) {
+            Ok(bytes) => bytes,
+            Err(rend_meta::lookup::Error::NotFound) => {
+                return Err(ApiError::bad("no image found at that url"));
+            }
+            Err(error) => return Err(ApiError::bad(format!("could not fetch the image: {error}"))),
+        };
+        self.set_custom_cover(index, bytes)
+    }
+
+    /// Clears the drive's custom cover and refetches the matched release's
+    /// archive cover.
+    pub fn reset_custom_cover(&self, index: usize) -> Result<(), ApiError> {
+        let release_id = {
+            let mut drives = self.drives_guard();
+            let Some(drive) = drives.get_mut(index) else {
+                return Err(ApiError::not_found("unknown drive"));
+            };
+            if !drive.cover_custom {
+                return Err(ApiError::conflict("this drive has no custom cover"));
+            }
+            if drive.rip.as_ref().is_some_and(|rip| rip.active) {
+                return Err(ApiError::conflict("stop the rip before changing the cover"));
+            }
+            drive.cover_custom = false;
+            drive.set_cover(None);
+            drive.cover_fetching = false;
             drive
                 .meta
                 .as_ref()
@@ -960,6 +1036,12 @@ impl AppState {
             let Some(drive) = drives.get_mut(index) else {
                 return;
             };
+            // A cover the user chose is final for this disc: never replace it
+            // with the archive's.
+            if drive.cover_custom {
+                drive.cover_fetching = false;
+                return;
+            }
             if drive.demo {
                 drive.set_cover(Some(demo_cover()));
                 drive.cover_fetching = false;
@@ -1044,8 +1126,10 @@ impl AppState {
             drive.candidates = candidates;
             drive.match_sel = 0;
             drive.meta = drive.candidates.first().map(|c| c.meta.clone());
-            drive.set_cover(None);
-            drive.cover_fetching = false;
+            if !drive.cover_custom {
+                drive.set_cover(None);
+                drive.cover_fetching = false;
+            }
             drive.meta_edited = false;
             if drive.candidates.is_empty() {
                 drive.lookup_status = "no match".to_string();
@@ -1059,9 +1143,11 @@ impl AppState {
                 .as_ref()
                 .map(|meta| meta.release_id.clone())
                 .filter(|release_id| !release_id.is_empty());
-            if let Some(release_id) = &release_id {
-                if let Some(cover) = cache.cover(release_id).cloned() {
-                    drive.set_cover(cover);
+            if !drive.cover_custom {
+                if let Some(release_id) = &release_id {
+                    if let Some(cover) = cache.cover(release_id).cloned() {
+                        drive.set_cover(cover);
+                    }
                 }
             }
             release_id
@@ -1179,8 +1265,11 @@ impl AppState {
                             d.candidates.clear();
                             d.meta = None;
                             d.match_sel = 0;
+                            // A new disc: any custom cover belonged to the
+                            // previous one.
                             d.set_cover(None);
                             d.cover_fetching = false;
+                            d.cover_custom = false;
                             true
                         }
                         Err(error) => {
@@ -1262,8 +1351,13 @@ impl AppState {
                         return;
                     }
                     let mut cache = self.cache_guard();
+                    // Cache the archive's art either way, so a later reset
+                    // can restore it without a refetch; but only show it when
+                    // the user hasn't chosen their own.
                     cache.cover_insert(release_id, cover.clone());
-                    d.set_cover(cover);
+                    if !d.cover_custom {
+                        d.set_cover(cover);
+                    }
                     d.cover_fetching = false;
                     true
                 };
@@ -1404,6 +1498,7 @@ impl Drive {
             cover: None,
             cover_data: None,
             cover_fetching: false,
+            cover_custom: false,
             meta_edited: false,
             rip: None,
             meta_gen: 0,
@@ -1437,6 +1532,7 @@ impl Drive {
             cover,
             cover_data,
             cover_fetching: false,
+            cover_custom: false,
             meta_edited: false,
             rip: None,
             meta_gen: 0,
@@ -1493,6 +1589,7 @@ impl Drive {
         self.match_sel = 0;
         self.set_cover(None);
         self.cover_fetching = false;
+        self.cover_custom = false;
         self.meta_edited = false;
         self.toc_failed = false;
         self.lookup_status = "no disc".to_string();
@@ -1526,6 +1623,7 @@ impl Drive {
             meta: self.meta.as_ref().map(MetaView::from_meta),
             cover: self.cover_data.clone(),
             cover_fetching: self.cover_fetching,
+            cover_custom: self.cover_custom,
             rip: self.rip.as_ref().map(RipControl::view),
         }
     }
@@ -1900,6 +1998,86 @@ mod tests {
         assert!(drive.cover.is_some());
     }
 
+    fn custom_jpeg() -> Vec<u8> {
+        vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9,
+        ]
+    }
+
+    #[test]
+    fn custom_cover_replaces_archive_art() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        let bytes = custom_jpeg();
+        state.set_custom_cover(0, bytes.clone()).unwrap();
+
+        let drive = &state.view().drives[0];
+        assert!(drive.cover_custom);
+        assert_eq!(
+            drive.cover.as_deref().map(|s| s.as_str()),
+            cover_data_url(&bytes).as_deref()
+        );
+    }
+
+    #[test]
+    fn custom_cover_survives_match_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        let bytes = custom_jpeg();
+        state.set_custom_cover(0, bytes.clone()).unwrap();
+        // Switching the MusicBrainz match must not clobber the chosen cover.
+        state.select_match(0, 1).unwrap();
+
+        let drive = &state.view().drives[0];
+        assert!(drive.cover_custom);
+        assert_eq!(
+            drive.cover.as_deref().map(|s| s.as_str()),
+            cover_data_url(&bytes).as_deref()
+        );
+    }
+
+    #[test]
+    fn reset_custom_cover_returns_to_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        state.set_custom_cover(0, custom_jpeg()).unwrap();
+        assert!(state.view().drives[0].cover_custom);
+
+        state.reset_custom_cover(0).unwrap();
+
+        let drive = &state.view().drives[0];
+        assert!(!drive.cover_custom);
+        // The demo drive's archive art is the demo cover.
+        assert_eq!(
+            drive.cover.as_deref().map(|s| s.as_str()),
+            cover_data_url(&demo_cover()).as_deref()
+        );
+    }
+
+    #[test]
+    fn set_custom_cover_rejects_non_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        let error = state
+            .set_custom_cover(0, b"not an image".to_vec())
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(!state.view().drives[0].cover_custom);
+    }
+
+    #[test]
+    fn reset_without_custom_cover_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        let error = state.reset_custom_cover(0).unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
     #[test]
     fn tags_can_be_edited() {
         let dir = tempfile::tempdir().unwrap();
@@ -2089,6 +2267,7 @@ mod tests {
             cover: None,
             cover_data: None,
             cover_fetching: false,
+            cover_custom: false,
             meta_edited: true,
             rip: None,
             meta_gen: 2,

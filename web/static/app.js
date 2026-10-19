@@ -475,15 +475,89 @@ function updateTocSlot(record, drive, active) {
   syncRipSlot(slot, rip);
 }
 
+// Overlay of controls revealed on hover/focus of the cover: replace the
+// matched art with a pasted image, a file, or a URL, and reset back to the
+// matched art. Only once the disc has a TOC; disabled while a rip runs.
+function coverControls(drive, active) {
+  if (!drive.toc) return "";
+  const disabled = active ? "disabled" : "";
+  const stopTitle = "stop the rip before changing the cover";
+  return `
+    <span class="cover-custom-pill ${drive.coverCustom ? "" : "hidden"}">custom</span>
+    <div class="cover-controls">
+      <button type="button" class="btn btn--sm" data-action="set-cover" ${disabled} title="${active ? stopTitle : "paste an image or pick a file"}">Set cover</button>
+      <button type="button" class="btn btn--sm" data-action="cover-url" ${disabled} title="${active ? stopTitle : "fetch the cover from a URL"}">From URL</button>
+      ${
+    drive.coverCustom
+      ? `<button type="button" class="btn btn--sm" data-action="reset-cover" ${disabled} title="${active ? stopTitle : "restore the matched cover"}">Reset</button>`
+      : ""
+  }
+    </div>`;
+}
+
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("could not read that image"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function sendCoverFile(index, file) {
+  if (pending.has(index)) return;
+  pending.add(index);
+  try {
+    const data = await readAsDataUrl(file);
+    const seq = ++snapshotSeq;
+    applySnapshot(seq, await post(`/api/drives/${index}/cover`, { data }));
+  } catch (error) {
+    addLog(error.message);
+  } finally {
+    pending.delete(index);
+    render();
+  }
+}
+
+async function coverFromUrl(index) {
+  if (pending.has(index)) return;
+  const url = (window.prompt("Cover image URL") || "").trim();
+  if (!url) return;
+  pending.add(index);
+  try {
+    const seq = ++snapshotSeq;
+    applySnapshot(seq, await post(`/api/drives/${index}/cover`, { url }));
+  } catch (error) {
+    addLog(error.message);
+  } finally {
+    pending.delete(index);
+    render();
+  }
+}
+
+function pickCoverFile(index) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (file) sendCoverFile(index, file);
+  });
+  input.click();
+}
+
 function updateMetaSlot(record, drive) {
   // Rebuilding here re-assigns the cover's data URL, making the browser
   // re-decode it; skip the rebuild when none of the inputs changed.
   const meta = drive.meta;
+  const active = Boolean(drive.rip && drive.rip.active);
   const metaKey = [
     drive.lookupStatus,
     drive.mcn || "",
     drive.registerUrl || "",
     drive.coverFetching,
+    drive.coverCustom,
+    active,
     Boolean(drive.toc),
     meta ? `${meta.artist}\u0000${meta.album}\u0000${meta.year || ""}` : "",
   ].join("\u0000");
@@ -494,11 +568,12 @@ function updateMetaSlot(record, drive) {
   const artist = meta ? meta.artist : "";
   const year = meta ? meta.year : null;
   record.card.querySelector(".meta-slot").innerHTML = `
-    <div class="cover">
+    <div class="cover" tabindex="0" aria-label="Album cover: paste an image, or use the buttons to replace it">
       <img src="${escapeHtml(drive.cover || "")}" alt="cover art" ${
     drive.cover ? "" : "hidden"
   }>
       <div class="cover-fallback" ${drive.cover ? "hidden" : ""}>${DISC_SVG}</div>
+      ${coverControls(drive, active)}
     </div>
     <div class="disc-title">
       <h3 class="disc-album">${
@@ -988,6 +1063,14 @@ function bindDelegated() {
         openTagsEditor(index);
         return;
       }
+      if (action === "set-cover") {
+        pickCoverFile(index);
+        return;
+      }
+      if (action === "cover-url") {
+        coverFromUrl(index);
+        return;
+      }
       pending.add(index);
       try {
         if (action === "load") {
@@ -1009,6 +1092,9 @@ function bindDelegated() {
         } else if (action === "eject") {
           const seq = ++snapshotSeq;
           applySnapshot(seq, await post(`/api/drives/${index}/eject`));
+        } else if (action === "reset-cover") {
+          const seq = ++snapshotSeq;
+          applySnapshot(seq, await post(`/api/drives/${index}/cover/reset`));
         }
       } catch (error) {
         addLog(error.message);
@@ -1037,6 +1123,39 @@ function bindDelegated() {
       } finally {
         pending.delete(index);
         render();
+      }
+    }
+  });
+
+  // Pasting an image anywhere in a drive card sets it as the cover. The tags
+  // editor lives outside the cards, so those pastes are never hijacked.
+  main.addEventListener("paste", (event) => {
+    const card = event.target.closest(".drive");
+    if (!card) return;
+    const target = event.target;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+    const index = Number(card.dataset.index);
+    const drive = state.drives.find((candidate) => candidate.index === index);
+    if (!drive || !drive.toc) return;
+    if (pending.has(index)) return;
+    if (drive.rip && drive.rip.active) return;
+    const items = event.clipboardData && event.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) {
+          event.preventDefault();
+          sendCoverFile(index, file);
+          return;
+        }
       }
     }
   });

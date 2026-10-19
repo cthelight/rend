@@ -61,6 +61,9 @@ pub struct DriveView {
     /// Cover art as a base64 data URL, if fetched.
     pub cover: Option<Arc<String>>,
     pub cover_fetching: bool,
+    /// True when the cover was supplied by the user instead of fetched from
+    /// the Cover Art Archive.
+    pub cover_custom: bool,
     pub rip: Option<RipView>,
 }
 
@@ -323,18 +326,30 @@ impl ServerEvent {
 /// Returns `None` when the bytes do not look like an image the browser
 /// can display.
 pub fn cover_data_url(bytes: &[u8]) -> Option<String> {
-    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        "image/png"
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF8") {
-        "image/gif"
-    } else if bytes.starts_with(b"BM") {
-        "image/bmp"
-    } else {
-        return None;
-    };
+    let mime = rend_meta::sniff_mime(bytes)?;
     Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+}
+
+/// Decode user-supplied cover art into raw bytes.
+///
+/// Accepts either a `data:` URL (`data:image/png;base64,....`) or a bare
+/// base64 string, as produced by the browser's file reader and clipboard.
+/// Whitespace in the base64 payload is ignored.
+pub fn decode_image_data(input: &str) -> Result<Vec<u8>, String> {
+    let payload = input.trim();
+    let b64 = match payload.find(',') {
+        Some(comma) if payload.starts_with("data:") => &payload[comma + 1..],
+        Some(_) => return Err("not a data URL or a base64 string".to_string()),
+        None => payload,
+    };
+    let b64: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = STANDARD
+        .decode(&b64)
+        .map_err(|_| "invalid base64 in the cover data".to_string())?;
+    if bytes.is_empty() {
+        return Err("the cover data is empty".to_string());
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -361,6 +376,35 @@ mod tests {
         );
         assert_eq!(cover_data_url(b"RIIF\x00\x00"), None);
         assert_eq!(cover_data_url(b"RI"), None);
+    }
+
+    #[test]
+    fn decode_accepts_data_urls_and_bare_base64() {
+        let png = &[0x89, b'P', b'N', b'G', 0, 0, 0, 0];
+        let b64 = STANDARD.encode(png);
+        assert_eq!(decode_image_data(&b64), Ok(png.to_vec()));
+        assert_eq!(
+            decode_image_data(&format!("data:image/png;base64,{b64}")),
+            Ok(png.to_vec())
+        );
+        // Whitespace in the payload is tolerated.
+        let spaced =
+            b64.chars()
+                .collect::<Vec<_>>()
+                .chunks(4)
+                .fold(String::new(), |mut acc, chunk| {
+                    acc.extend(chunk);
+                    acc.push('\n');
+                    acc
+                });
+        assert_eq!(decode_image_data(&spaced), Ok(png.to_vec()));
+    }
+
+    #[test]
+    fn decode_rejects_garbage() {
+        assert!(decode_image_data("not base64 !!!").is_err());
+        assert!(decode_image_data("http://example.com/x.png").is_err());
+        assert!(decode_image_data("").is_err());
     }
 
     #[test]
@@ -397,6 +441,7 @@ mod tests {
                 meta: None,
                 cover: None,
                 cover_fetching: false,
+                cover_custom: false,
                 rip: None,
             }),
         };

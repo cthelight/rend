@@ -7,10 +7,12 @@
 //! [`cover_art`] fetches the release's front cover — keeps lookups of a
 //! known disc in memory for the session in a [`MetaCache`], names the
 //! output files after the result ([`Template`]), and writes it into the
-//! encoded audio files with [`apply`].
+//! encoded audio files with [`apply`]. [`sniff_mime`] and [`fetch_image`]
+//! let a front end supply its own cover art instead of the archive's.
 
 pub mod cache;
 pub mod discid;
+pub mod image;
 pub mod lookup;
 pub mod naming;
 pub mod tag;
@@ -18,6 +20,7 @@ pub mod throttle;
 
 pub use cache::MetaCache;
 pub use discid::{disc_id, mb_discid};
+pub use image::{fetch_image, sniff_mime};
 pub use lookup::{
     Candidate, DiscMeta, DiscToc, TrackMeta, cover_art, lookup_candidates, lookup_disc,
     lookup_disc_all, register_disc_id_url,

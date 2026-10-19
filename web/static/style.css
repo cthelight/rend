@@ -642,6 +642,12 @@ header h1 {
   cursor: default;
 }
 
+.btn--sm {
+  padding: 0.28rem 0.55rem;
+  font-size: 0.78rem;
+  border-radius: 6px;
+}
+
 .btn--primary {
   background: linear-gradient(180deg, #6f9bff, #4f7df0);
   border-color: #4f7df0;
@@ -724,6 +730,45 @@ header h1 {
   width: 58px;
   height: 58px;
   opacity: 0.55;
+}
+
+.cover-custom-pill {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--accent-strong);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+
+.cover-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 1.4rem 0.55rem 0.55rem;
+  background: linear-gradient(180deg, transparent, rgba(8, 11, 17, 0.88));
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.cover:hover .cover-controls,
+.cover:focus .cover-controls,
+.cover:focus-within .cover-controls {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .disc-album {

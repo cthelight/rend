@@ -18,7 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::assets;
 use crate::shutdown_signal;
 use crate::state::{ApiError, AppState};
-use crate::view::{ServerEvent, StateView};
+use crate::view::{ServerEvent, StateView, decode_image_data};
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -37,6 +37,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/drives/{i}/eject", post(eject))
         .route("/api/drives/{i}/match", post(select_match))
         .route("/api/drives/{i}/tags", post(tags))
+        .route("/api/drives/{i}/cover", post(set_cover))
+        .route("/api/drives/{i}/cover/reset", post(reset_cover))
         .with_state(state)
 }
 
@@ -230,6 +232,50 @@ async fn tags(
         .map(|track| (track.title, track.artist))
         .collect();
     match state.set_tags(i, req.album, req.artist, req.album_artist, req.year, tracks) {
+        Ok(()) => (StatusCode::OK, Json(state.view())).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoverRequest {
+    /// Base64 image data, optionally as a `data:` URL.
+    #[serde(default)]
+    data: Option<String>,
+    /// URL to fetch the image from.
+    #[serde(default)]
+    url: Option<String>,
+}
+
+async fn set_cover(
+    State(state): State<Arc<AppState>>,
+    Path(i): Path<usize>,
+    Json(req): Json<CoverRequest>,
+) -> Response {
+    match (req.data, req.url) {
+        (Some(data), None) => match decode_image_data(&data) {
+            Ok(bytes) => match state.set_custom_cover(i, bytes) {
+                Ok(()) => (StatusCode::OK, Json(state.view())).into_response(),
+                Err(error) => error_response(error),
+            },
+            Err(message) => error_response(ApiError::bad(message)),
+        },
+        (None, Some(url)) => {
+            let worker = Arc::clone(&state);
+            match tokio::task::spawn_blocking(move || worker.set_custom_cover_url(i, url)).await {
+                Ok(Ok(())) => (StatusCode::OK, Json(state.view())).into_response(),
+                Ok(Err(error)) => error_response(error),
+                Err(join) => internal(join),
+            }
+        }
+        // Both or neither: the client must supply exactly one source.
+        _ => error_response(ApiError::bad("provide exactly one of 'data' or 'url'")),
+    }
+}
+
+async fn reset_cover(State(state): State<Arc<AppState>>, Path(i): Path<usize>) -> Response {
+    match state.reset_custom_cover(i) {
         Ok(()) => (StatusCode::OK, Json(state.view())).into_response(),
         Err(error) => error_response(error),
     }
