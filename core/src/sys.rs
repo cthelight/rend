@@ -12,7 +12,9 @@ use libc::{c_char, c_int, c_uchar, c_uint, c_ulong};
 /// Runs a cdrom ioctl that takes no argument, returning its status value.
 pub(crate) fn ioctl_cmd(file: &File, req: c_ulong) -> io::Result<i32> {
     // SAFETY: the fd is owned by `file` and valid; no user data is passed.
-    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req) };
+    // The request is cast to `libc::Ioctl` because its width differs
+    // between C libraries (c_ulong on glibc, c_int on musl).
+    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req as libc::Ioctl) };
     if ret < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -24,7 +26,7 @@ pub(crate) fn ioctl_cmd(file: &File, req: c_ulong) -> io::Result<i32> {
 pub(crate) fn ioctl_with<T>(file: &File, req: c_ulong, arg: &mut T) -> io::Result<()> {
     // SAFETY: `arg` is a repr(C) struct whose layout matches the kernel's
     // (see the ABI tests in this module), and it outlives the call.
-    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req, arg as *mut T) };
+    let ret = unsafe { libc::ioctl(file.as_raw_fd(), req as libc::Ioctl, arg as *mut T) };
     if ret < 0 {
         Err(io::Error::last_os_error())
     } else {
