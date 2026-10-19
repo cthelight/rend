@@ -885,9 +885,12 @@ header h1 {
 .toc-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.75rem;
   margin-bottom: 0.5rem;
+}
+
+.toc-head .btn--edit {
+  margin-left: auto;
 }
 
 .selectall {
@@ -934,6 +937,16 @@ tbody tr {
 
 tbody tr:hover {
   background: rgba(122, 162, 255, 0.045);
+}
+
+/* The row of the track currently being ripped stays highlighted so it
+   reads at a glance without scanning the state pills. */
+tbody tr.row--ripping {
+  background: var(--accent-soft);
+}
+
+tbody tr.row--ripping:hover {
+  background: rgba(122, 162, 255, 0.1);
 }
 
 .col-check {
@@ -1027,6 +1040,24 @@ input[type="text"]:focus {
 
 /* ---------- tags ---------- */
 
+.btn--edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+.btn--edit svg {
+  width: 13px;
+  height: 13px;
+  color: var(--text-3);
+}
+
+.btn--edit:hover:not(:disabled) svg {
+  color: var(--text-2);
+}
+
 .tags {
   display: grid;
   gap: 0.6rem;
@@ -1048,23 +1079,105 @@ input[type="text"]:focus {
   color: var(--text-3);
 }
 
-.tags-actions {
+/* ---------- tag editor modal ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(5, 8, 14, 0.66);
+  backdrop-filter: blur(3px);
+}
+
+.modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(720px, 100%);
+  max-height: min(780px, calc(100vh - 3rem));
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.icon-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.modal-body {
+  display: grid;
+  align-content: start;
+  gap: 0.9rem;
+  overflow-y: auto;
+  padding: 1rem 1.1rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.modal-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.modal-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.modal-foot {
   display: flex;
   justify-content: flex-end;
-  margin-top: 0.2rem;
+  gap: 0.5rem;
+  padding: 0.8rem 1.1rem;
+  border-top: 1px solid var(--border-soft);
 }
 
-/* ---------- rip ---------- */
-
-.rip {
-  display: grid;
-  gap: 0.6rem;
-}
+/* ---------- rip (merged into the track table) ---------- */
 
 .rip-overall {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  margin-bottom: 0.35rem;
 }
 
 .rip-fraction {
@@ -1079,6 +1192,7 @@ input[type="text"]:focus {
   font-size: 0.76rem;
   color: var(--text-3);
   word-break: break-all;
+  margin-bottom: 0.55rem;
 }
 
 .col-prog {
@@ -1118,6 +1232,7 @@ input[type="text"]:focus {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.5rem 0.75rem;
+  margin-top: 0.6rem;
 }
 
 /* ---------- empty state ---------- */

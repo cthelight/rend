@@ -6,6 +6,8 @@ const railItems = new Map();
 let activeDrive = null;
 // Card indices with a request in flight; their action buttons are disabled.
 const pending = new Set();
+// Logical index of the drive whose tag editor is open; null when closed.
+let tagsEditorDrive = null;
 // Monotonically increasing; only the newest snapshot may be applied, so an
 // out-of-order response can never restore a stale view.
 let snapshotSeq = 0;
@@ -15,6 +17,10 @@ const DISC_SVG = `<svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
   <circle cx="32" cy="32" r="9" stroke="currentColor" stroke-width="2.5"/>
   <circle cx="32" cy="32" r="2.5" fill="currentColor"/>
   <path d="M11 41a24 24 0 0 1-1-17" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+</svg>`;
+
+const PENCIL_SVG = `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+  <path d="M11.33 2a1.885 1.885 0 1 1 2.667 2.667L5 13.67 1.33 14.67l1-3.67L11.33 2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
 </svg>`;
 
 function $(selector) {
@@ -310,34 +316,63 @@ function buildCard(drive) {
       </aside>
       <div class="tracks">
         <div class="toc-slot"></div>
-        <div class="tags-slot"></div>
-        <div class="rip-slot"></div>
       </div>
     </div>
   `;
   return card;
 }
 
-function tocTable(audioTracks, checked, active, titles) {
+// The track table doubles as the rip view: while a rip session exists
+// (running or finished) each selected track grows a state and progress
+// cell, and the overall bar + summary wrap the table, so the progress
+// never leaves the list of tracks.
+function tocTable(audioTracks, checked, active, titles, rip) {
   const all = audioTracks.length > 0 && audioTracks.every((t) => checked.has(t.number));
+  // Only the tracks targeted by the rip get a state cell; unselected rows
+  // stay plain, their checkbox already says they were not part of it.
+  const ripNumbers = rip ? new Set(rip.tracks) : new Set();
   return `
     <div class="toc">
       <h3 class="section-title">Tracks</h3>
+      <div class="rip-overall hidden">
+        <span class="bar bar--lg"><span class="fill"></span></span>
+        <span class="rip-fraction"></span>
+      </div>
+      <div class="rip-meta hidden"></div>
       <div class="toc-head">
         <label class="selectall">
           <input type="checkbox" data-select-all ${all ? "checked" : ""} ${active ? "disabled" : ""}>
           <span>Select all</span>
         </label>
         <span class="toc-count"></span>
+        ${
+          titles
+            ? `
+        <button
+          type="button"
+          class="btn btn--edit"
+          data-action="edit-tags"
+          ${active ? "disabled" : ""}
+          title="${active ? "stop the rip before editing tags" : "open the tag editor"}"
+        >
+          ${PENCIL_SVG}
+          <span>Edit tags</span>
+        </button>`
+            : ""
+        }
       </div>
       <table>
         <thead>
-          <tr><th class="col-check"></th><th class="col-num">#</th><th>Title</th><th class="col-dur">Time</th></tr>
+          <tr>
+            <th class="col-check"></th><th class="col-num">#</th><th>Title</th><th class="col-dur">Time</th>
+            ${rip ? '<th class="col-state">state</th><th class="col-prog">progress</th>' : ""}
+          </tr>
         </thead>
         <tbody>
           ${audioTracks
             .map((track, index) => {
               const title = titles && titles[index] ? titles[index].title : "";
+              const inRip = ripNumbers.has(track.number);
               return `
             <tr data-track-row="${track.number}">
               <td class="col-check">
@@ -356,11 +391,24 @@ function tocTable(audioTracks, checked, active, titles) {
                   : `<span class="track-fallback">Track ${track.number}</span>`
               }</td>
               <td class="col-dur">${duration(track.durationSecs)}</td>
+              ${
+                inRip
+                  ? `
+              <td class="col-state"><span class="state"></span></td>
+              <td class="col-prog">
+                <span class="prog-wrap" data-state-cell="${track.number}">
+                  <span class="bar"><span class="fill"></span></span>
+                  <span class="prog-text hidden"></span>
+                </span>
+              </td>`
+                  : ""
+              }
             </tr>`;
             })
             .join("")}
         </tbody>
       </table>
+      <div class="summary hidden"></div>
     </div>`;
 }
 
@@ -383,6 +431,15 @@ function syncTocSlot(slot, audioTracks, selected, active) {
   if (count) {
     count.textContent = `${selectedCount} of ${audioTracks.length} selected`;
   }
+  // The render key does not include the rip's active flag, so the button's
+  // disabled state is kept in step here rather than at render time.
+  const editTags = slot.querySelector('[data-action="edit-tags"]');
+  if (editTags) {
+    editTags.disabled = active;
+    editTags.title = active
+      ? "stop the rip before editing tags"
+      : "open the tag editor";
+  }
 }
 
 function updateTocSlot(record, drive, active) {
@@ -390,8 +447,12 @@ function updateTocSlot(record, drive, active) {
   const tracks = drive.toc ? drive.toc.tracks : [];
   const audioTracks = tracks.filter((track) => track.kind === "audio");
   const titles = drive.meta ? drive.meta.tracks : null;
+  const rip = drive.rip;
   const numbersKey = audioTracks.map((track) => track.number).join(",");
   const titleKey = titles ? titles.map((track) => track.title).join("|") : "";
+  // Which rows carry rip cells changes the table shape, so the selected
+  // set is part of the render key; per-track state updates are incremental.
+  const ripKey = rip ? rip.tracks.join(",") : "none";
 
   if (!drive.toc) {
     record.tocKey = null;
@@ -404,13 +465,14 @@ function updateTocSlot(record, drive, active) {
     record.checked = new Set(audioTracks.map((track) => track.number));
     record.tocRenderKey = null;
   }
-  const selected = active ? new Set(drive.rip.tracks) : record.checked;
-  const renderKey = `${numbersKey}|${titleKey}`;
+  const selected = active ? new Set(rip.tracks) : record.checked;
+  const renderKey = `${numbersKey}|${titleKey}|${ripKey}`;
   if (record.tocRenderKey !== renderKey) {
     record.tocRenderKey = renderKey;
-    slot.innerHTML = tocTable(audioTracks, selected, active, titles);
+    slot.innerHTML = tocTable(audioTracks, selected, active, titles, rip);
   }
   syncTocSlot(slot, audioTracks, selected, active);
+  syncRipSlot(slot, rip);
 }
 
 function updateMetaSlot(record, drive) {
@@ -511,113 +573,96 @@ function updateMatchesSlot(card, drive, active) {
   </div>`;
 }
 
-function updateTagsSlot(record, drive, active) {
-  const slot = record.card.querySelector(".tags-slot");
+// Collapsed view of the tags section: just a bar with an edit button.
+// The full editor lives in a modal so a long track list never pushes the
+// rest of the card down.
+function tagsFormHtml(drive) {
   const meta = drive.meta;
-  if (!meta) {
-    if (record.formKey !== "none") {
-      slot.innerHTML = "";
-      record.formKey = "none";
-    }
-    return;
-  }
-  const formKey = `meta:${drive.matchSel}:${meta.tracks.length}`;
-  if (record.formKey !== formKey) {
-    slot.innerHTML = `<form class="tags" data-tags="${drive.index}">
-      <h3 class="section-title">Tags</h3>
-      <div class="tags-grid">
-        <label>Artist <input name="artist" value="${escapeHtml(meta.artist)}"></label>
-        <label>Album <input name="album" value="${escapeHtml(meta.album)}"></label>
-        <label>Album artist <input name="albumArtist" value="${escapeHtml(
-          meta.albumArtist || ""
-        )}"></label>
-        <label>Year <input name="year" value="${escapeHtml(meta.year || "")}"></label>
-      </div>
-      <table>
-        <thead>
-          <tr><th class="col-num">#</th><th>Title</th><th>Track artist</th></tr>
-        </thead>
-        <tbody>
-          ${meta.tracks
-            .map(
-              (track, index) => `
-            <tr>
-              <td class="col-num">${index + 1}</td>
-              <td><input name="title-${index}" value="${escapeHtml(track.title)}"></td>
-              <td><input name="artist-${index}" value="${escapeHtml(
-                track.artist || ""
-              )}"></td>
-            </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table>
-      <div class="tags-actions">
-        <button type="submit" class="btn btn--primary">Save tags</button>
-      </div>
-    </form>`;
-    record.formKey = formKey;
-  }
-  const submit = slot.querySelector('button[type="submit"]');
-  if (submit) submit.disabled = active;
+  return `
+    <div class="tags-grid">
+      <label>Artist <input name="artist" value="${escapeHtml(meta.artist)}"></label>
+      <label>Album <input name="album" value="${escapeHtml(meta.album)}"></label>
+      <label>Album artist <input name="albumArtist" value="${escapeHtml(
+        meta.albumArtist || ""
+      )}"></label>
+      <label>Year <input name="year" value="${escapeHtml(meta.year || "")}"></label>
+    </div>
+    <table>
+      <thead>
+        <tr><th class="col-num">#</th><th>Title</th><th>Track artist</th></tr>
+      </thead>
+      <tbody>
+        ${meta.tracks
+          .map(
+            (track, index) => `
+          <tr>
+            <td class="col-num">${index + 1}</td>
+            <td><input name="title-${index}" value="${escapeHtml(track.title)}"></td>
+            <td><input name="artist-${index}" value="${escapeHtml(
+              track.artist || ""
+            )}"></td>
+          </tr>`
+          )
+          .join("")}
+      </tbody>
+    </table>`;
 }
 
-function updateRipSlot(record, drive) {
-  const slot = record.card.querySelector(".rip-slot");
-  const rip = drive.rip;
+function openTagsEditor(index) {
+  if (tagsEditorDrive !== null) return;
+  const drive = state.drives.find((candidate) => candidate.index === index);
+  if (!drive || !drive.meta) return;
+  tagsEditorDrive = index;
+  const form = $("#tags-form");
+  form.dataset.tags = String(index);
+  form.innerHTML = tagsFormHtml(drive);
+  $("#tags-modal-title").textContent = `Edit tags — ${drive.meta.artist} — ${drive.meta.album}`;
+  $("#tags-modal").classList.remove("hidden");
+  form.querySelector("input")?.focus();
+}
+
+function closeTagsEditor() {
+  if (tagsEditorDrive === null) return;
+  const index = tagsEditorDrive;
+  tagsEditorDrive = null;
+  $("#tags-modal").classList.add("hidden");
+  $("#tags-form").innerHTML = "";
+  document
+    .querySelector(`.drive[data-index="${index}"] [data-action="edit-tags"]`)
+    ?.focus();
+}
+
+// Incrementally paints the rip state onto the track table: the overall
+// bar, the per-track state pill + progress bar in the row cells, and the
+// final summary. Cells only exist for tracks in the current rip session.
+function syncRipSlot(slot, rip) {
+  const overall = slot.querySelector(".rip-overall");
+  if (!overall) return;
+  const meta = slot.querySelector(".rip-meta");
+  const summary = slot.querySelector(".summary");
   if (!rip) {
-    slot.innerHTML = "";
-    record.ripRows = null;
+    overall.classList.add("hidden");
+    meta.classList.add("hidden");
+    summary.classList.add("hidden");
+    summary.textContent = "";
     return;
   }
-  const rows = rip.states.map((trackState) => trackState.number);
-  const sameRows =
-    record.ripRows &&
-    record.ripRows.length === rows.length &&
-    rows.every((number, i) => number === record.ripRows[i]);
-  if (!sameRows) {
-    record.ripRows = rows;
-    slot.innerHTML = `
-      <div class="rip">
-        <h3 class="section-title">Rip</h3>
-        <div class="rip-overall">
-          <span class="bar bar--lg"><span class="fill"></span></span>
-          <span class="rip-fraction"></span>
-        </div>
-        <div class="rip-meta"></div>
-        <table>
-          <thead>
-            <tr><th class="col-num">#</th><th>state</th><th class="col-prog">progress</th></tr>
-          </thead>
-          <tbody>
-            ${rip.states
-              .map(
-                (trackState) => `
-              <tr data-state-number="${trackState.number}">
-                <td class="col-num">${trackState.number}</td>
-                <td class="state"></td>
-                <td class="prog"></td>
-              </tr>`
-              )
-              .join("")}
-          </tbody>
-        </table>
-        <div class="summary"></div>
-      </div>`;
-  }
-  slot.querySelector(".rip-meta").textContent = [
+  overall.classList.remove("hidden");
+  meta.classList.remove("hidden");
+  meta.textContent = [
     `${(rip.formats ?? []).join(", ")} → ${rip.outDir}`,
     rip.force ? "(force)" : "",
   ]
     .filter(Boolean)
     .join(" ");
   const { finished, units, fraction } = ripProgress(rip);
-  const overall = slot.querySelector(".rip-overall");
   overall.querySelector(".fill").style.width = `${Math.round(fraction * 100)}%`;
   overall.querySelector(".rip-fraction").textContent = `${finished} of ${units} tracks`;
   for (const trackState of rip.states) {
-    const row = slot.querySelector(`[data-state-number="${trackState.number}"]`);
-    if (!row) continue;
+    const wrap = slot.querySelector(`[data-state-cell="${trackState.number}"]`);
+    if (!wrap) continue;
+    const row = wrap.closest("tr");
+    row.classList.toggle("row--ripping", trackState.status === "ripping");
     row.querySelector(".state").innerHTML = `
       <span class="pill pill--sm pill--${statePill(trackState.status)}"><span class="pill-dot"></span>${trackState.status}</span>`;
     let width = 0;
@@ -631,22 +676,17 @@ function updateRipSlot(record, drive) {
     if (trackState.total) {
       width = Math.max(width, Math.round((trackState.done / trackState.total) * 100));
     }
+    const bar = wrap.querySelector(".bar");
+    bar.className = `bar${barClass ? ` ${barClass}` : ""}`;
+    bar.querySelector(".fill").style.width = `${width}%`;
     const text = progress(trackState);
-    row.querySelector(".prog").innerHTML = `
-      <span class="prog-wrap">
-        <span class="bar ${barClass}"><span class="fill" style="width:${width}%"></span></span>
-        ${
-      text
-        ? `<span class="prog-text${
-            trackState.status === "failed" ? " prog-text--err" : ""
-          }">${escapeHtml(text)}</span>`
-        : ""
-    }
-      </span>`;
+    const progText = wrap.querySelector(".prog-text");
+    progText.textContent = text;
+    progText.classList.toggle("hidden", !text);
+    progText.classList.toggle("prog-text--err", trackState.status === "failed");
   }
-  const summary = slot.querySelector(".summary");
   summary.textContent = rip.summary || "";
-  summary.style.display = rip.summary ? "" : "none";
+  summary.classList.toggle("hidden", !rip.summary);
 }
 
 function updateCard(record, drive) {
@@ -677,8 +717,6 @@ function updateCard(record, drive) {
   updateTocSlot(record, drive, active);
   updateMetaSlot(record, drive);
   updateMatchesSlot(card, drive, active);
-  updateTagsSlot(record, drive, active);
-  updateRipSlot(record, drive);
 }
 
 // What a rail row says about its drive: the status dot, the one-line
@@ -824,8 +862,13 @@ function applyRipEvent(driveId, event) {
     (candidate) => candidate.path === driveId || candidate.label === driveId
   );
   if (!drive || !drive.rip) return;
-  const track = drive.rip.states.find((candidate) => candidate.number === event.number);
-  if (!track) return;
+  // Per-track events carry the track number; the terminal "finished" event
+  // does not, so only require the lookup for the former.
+  const track =
+    event.number != null
+      ? drive.rip.states.find((candidate) => candidate.number === event.number)
+      : null;
+  if (event.number != null && !track) return;
 
   switch (event.event) {
     case "trackStarted":
@@ -882,8 +925,6 @@ function render() {
         tocRenderKey: null,
         metaKey: null,
         metaCover: null,
-        formKey: null,
-        ripRows: null,
       };
       cards.set(drive.index, record);
       main.appendChild(record.card);
@@ -894,6 +935,15 @@ function render() {
     if (!seen.has(index)) {
       record.card.remove();
       cards.delete(index);
+    }
+  }
+  if (tagsEditorDrive !== null) {
+    const stillThere = state.drives.some((drive) => drive.index === tagsEditorDrive);
+    if (!stillThere) {
+      closeTagsEditor();
+    } else {
+      const save = $("#tags-save");
+      if (save) save.disabled = pending.has(tagsEditorDrive);
     }
   }
   showActiveCard();
@@ -934,6 +984,10 @@ function bindDelegated() {
       const index = Number(card.dataset.index);
       if (pending.has(index)) return;
       const action = actionButton.dataset.action;
+      if (action === "edit-tags") {
+        openTagsEditor(index);
+        return;
+      }
       pending.add(index);
       try {
         if (action === "load") {
@@ -1027,13 +1081,18 @@ function bindDelegated() {
     }
   });
 
-  main.addEventListener("submit", async (event) => {
+  const modal = $("#tags-modal");
+  modal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-close-modal]") || event.target === modal) {
+      closeTagsEditor();
+    }
+  });
+  modal.addEventListener("submit", async (event) => {
     const form = event.target.closest("form[data-tags]");
     if (!form) return;
     event.preventDefault();
-    const card = form.closest(".drive");
-    const index = Number(card.dataset.index);
-    if (pending.has(index)) return;
+    const index = Number(form.dataset.tags);
+    if (tagsEditorDrive !== index || pending.has(index)) return;
     const data = new FormData(form);
     const trackCount = form.querySelectorAll('input[name^="title-"]').length;
     const tracks = [];
@@ -1056,12 +1115,16 @@ function bindDelegated() {
           tracks,
         })
       );
+      closeTagsEditor();
     } catch (error) {
       addLog(error.message);
     } finally {
       pending.delete(index);
       render();
     }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeTagsEditor();
   });
 }
 
