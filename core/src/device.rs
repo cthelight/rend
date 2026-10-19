@@ -180,7 +180,13 @@ impl Device {
         // Unlock the door; a plain value, not a pointer. Best effort:
         // drives without a lockable door ignore it.
         // SAFETY: the fd is owned by `file` and valid; no user data is passed.
-        let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), sys::CDROM_LOCKDOOR as libc::Ioctl, 0i32) };
+        let _ = unsafe {
+            libc::ioctl(
+                self.file.as_raw_fd(),
+                sys::CDROM_LOCKDOOR as libc::Ioctl,
+                0i32,
+            )
+        };
 
         if ioctl_cmd(&self.file, sys::CDROMEJECT).is_ok() {
             return Ok(());
@@ -218,8 +224,13 @@ impl Device {
         cgc.data_direction = sys::CGC_DATA_NONE;
 
         // SAFETY: the fd is owned by `file` and valid; `cgc` outlives the call.
-        let ret =
-            unsafe { libc::ioctl(self.file.as_raw_fd(), sys::CDROM_SEND_PACKET as libc::Ioctl, &mut cgc) };
+        let ret = unsafe {
+            libc::ioctl(
+                self.file.as_raw_fd(),
+                sys::CDROM_SEND_PACKET as libc::Ioctl,
+                &mut cgc,
+            )
+        };
         if ret < 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -273,8 +284,13 @@ impl Device {
         cgc.sense = sense.as_mut_ptr().cast::<c_char>();
         cgc.data_direction = sys::CGC_DATA_READ;
 
-        let ret =
-            unsafe { libc::ioctl(self.file.as_raw_fd(), sys::CDROM_SEND_PACKET as libc::Ioctl, &mut cgc) };
+        let ret = unsafe {
+            libc::ioctl(
+                self.file.as_raw_fd(),
+                sys::CDROM_SEND_PACKET as libc::Ioctl,
+                &mut cgc,
+            )
+        };
         if ret < 0 {
             return Err(io::Error::last_os_error().into());
         }
