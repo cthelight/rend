@@ -254,6 +254,39 @@ updates without polling. As with the TUI, several drives can rip at the
 same time, and multi-drive rips write to per-device subdirectories of the
 output path.
 
+## Docker
+
+The `Dockerfile` at the repository root builds a minimal image: `rend-wui`
+(a static musl binary), a stripped-down `ffmpeg` that accepts raw PCM on a
+pipe and can encode the five audio formats `rend` supports — FLAC, MP3,
+AAC/M4A, Opus, and Vorbis/OGG — plus exactly the shared libraries that
+`ffmpeg` links against (musl's loader, `libmp3lame`, `libopus`,
+`libvorbis`, `libogg`). Nothing else is in it: no decoders, no video, no
+network, no package manager, and the final stage is `scratch` with every
+file copied in explicitly, so the whole image is a few MB.
+
+```sh
+make docker       # build the image as rend-wui:local
+make docker-demo  # run it with the simulated disc on http://127.0.0.1:3000/
+```
+
+To rip a real disc, hand the container the CD-ROM device and a volume for
+the output:
+
+```sh
+docker run -d --name rend \
+    --device /dev/sr0:/dev/sr0 \
+    -v ~/rips:/output \
+    -p 3000:3000 \
+    rend-wui:local
+```
+
+Inside the container the server listens on `0.0.0.0:3000` and writes to
+`/output` (override with `-o` or `REND_WUI_OUTPUT_DIR`); every other flag
+and `REND_WUI_*` environment variable works as described above. The image
+is built for x86_64. Metadata lookup still needs outbound internet access
+and stays best effort — without it, rips are simply written untagged.
+
 ## Development
 
 ```sh

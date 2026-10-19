@@ -1,4 +1,5 @@
 CARGO  ?= cargo
+DOCKER ?= docker
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
@@ -9,9 +10,11 @@ WUI_BIN = rend-wui
 RELEASE_DIR = target/release
 DEBUG_DIR   = target/debug
 
+IMAGE = $(WUI_BIN):local
+
 .DEFAULT_GOAL := all
 
-.PHONY: all debug release install install-cli install-tui install-wui uninstall test clippy fmt lint clean help
+.PHONY: all debug release install install-cli install-tui install-wui uninstall test clippy fmt lint clean docker docker-demo help
 
 all: debug
 
@@ -44,6 +47,14 @@ install-wui: release
 ## Remove installed binaries from $(BINDIR)
 uninstall:
 	rm -f $(BINDIR)/$(BIN) $(BINDIR)/$(TUI_BIN) $(BINDIR)/$(WUI_BIN)
+
+## Build the minimal docker image (static rend-wui + audio-only ffmpeg)
+docker:
+	$(DOCKER) build -t $(IMAGE) .
+
+## Build the image and run it with the simulated disc on port 3000
+docker-demo: docker
+	$(DOCKER) run --rm -p 3000:3000 $(IMAGE) --demo
 
 ## Run the test suite
 test:
@@ -79,6 +90,8 @@ help:
 	@echo "  install-tui  Build and install '$(TUI_BIN)' to $(PREFIX)/bin"
 	@echo "  install-wui  Build and install '$(WUI_BIN)' to $(PREFIX)/bin"
 	@echo "  uninstall    Remove installed binaries from $(PREFIX)/bin"
+	@echo "  docker       Build the minimal docker image ($(IMAGE))"
+	@echo "  docker-demo  Build and run the image with the simulated disc"
 	@echo "  test         Run the test suite"
 	@echo "  clippy       Run clippy lints"
 	@echo "  fmt          Format the workspace"
@@ -89,3 +102,4 @@ help:
 	@echo "  PREFIX  Install prefix (default: ~/.local)"
 	@echo "  BINDIR  Binary directory (default: \$$PREFIX/bin)"
 	@echo "  CARGO   Cargo executable (default: cargo)"
+	@echo "  DOCKER  Docker executable (default: docker)"
