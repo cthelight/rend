@@ -2,7 +2,7 @@
 //! progress over an [`std::sync::mpsc`] channel.
 
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -152,29 +152,14 @@ impl TrackSpec {
             .formats
             .iter()
             .map(|format| {
-                // With looked-up metadata the file path comes from the naming
-                // template; without it the flat `trackNN` name is kept.
-                let path = match &job.meta {
-                    Some(disc) => {
-                        let position = job
-                            .toc
-                            .audio_tracks()
-                            .position(|t| t.number == track.number)
-                            .map(|i| i + 1)
-                            .unwrap_or(1);
-                        job.template.track_path(
-                            &job.out_dir,
-                            disc,
-                            track.number,
-                            position,
-                            format.extension(),
-                        )
-                    }
-                    None => {
-                        job.out_dir
-                            .join(format!("track{:02}.{}", track.number, format.extension()))
-                    }
-                };
+                let path = track_output_path(
+                    &job.out_dir,
+                    &job.meta,
+                    &job.template,
+                    &job.toc,
+                    track.number,
+                    format,
+                );
                 TrackOutput {
                     number: track.number,
                     path,
@@ -189,6 +174,56 @@ impl TrackSpec {
             outputs,
         }
     }
+}
+
+/// The output path of one track in one format.
+///
+/// With looked-up metadata the path comes from the naming template; without
+/// it the flat `trackNN` name is kept.
+fn track_output_path(
+    out_dir: &Path,
+    meta: &Option<DiscMeta>,
+    template: &Template,
+    toc: &Toc,
+    number: u8,
+    format: &Format,
+) -> PathBuf {
+    let position = toc
+        .audio_tracks()
+        .position(|t| t.number == number)
+        .map(|i| i + 1)
+        .unwrap_or(1);
+    match meta {
+        Some(disc) => template.track_path(out_dir, disc, number, position, format.extension()),
+        None => out_dir.join(format!("track{:02}.{}", number, format.extension())),
+    }
+}
+
+/// The output paths of the requested tracks, in request order.
+///
+/// Unknown track numbers are omitted.
+pub fn output_paths(
+    toc: &Toc,
+    out_dir: &Path,
+    meta: &Option<DiscMeta>,
+    template: &Template,
+    formats: &[Format],
+    tracks: &[u8],
+) -> Vec<(u8, Vec<PathBuf>)> {
+    tracks
+        .iter()
+        .copied()
+        .filter(|number| toc.track(*number).is_some())
+        .map(|number| {
+            (
+                number,
+                formats
+                    .iter()
+                    .map(|format| track_output_path(out_dir, meta, template, toc, number, format))
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 fn rip_track(job: &mut RipJob, number: u8, tx: &Sender<RipEvent>) -> Result<(), String> {
@@ -619,5 +654,51 @@ mod tests {
                 stopped: false
             })
         ));
+    }
+
+    #[test]
+    fn output_paths_follow_request_order_and_omit_unknown_tracks() {
+        let disc = DemoDisc::new();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = output_paths(
+            &disc.toc,
+            dir.path(),
+            &None,
+            &Template::default(),
+            &[Format::default()],
+            &[3, 2, 9],
+        );
+        assert_eq!(
+            paths,
+            vec![
+                (3, vec![dir.path().join("track03.flac")]),
+                (2, vec![dir.path().join("track02.flac")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn output_paths_use_the_naming_template_when_metadata_is_present() {
+        let disc = DemoDisc::new();
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::demo::demo_meta();
+        let paths = output_paths(
+            &disc.toc,
+            dir.path(),
+            &Some(meta),
+            &Template::default(),
+            &[Format::default()],
+            &[3],
+        );
+        assert_eq!(
+            paths,
+            vec![(
+                3,
+                vec![
+                    dir.path()
+                        .join("The Demo Band/Demo Album/03 Short One.flac")
+                ]
+            )]
+        );
     }
 }

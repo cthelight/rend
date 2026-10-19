@@ -10,4 +10,4 @@
 pub mod demo;
 mod worker;
 
-pub use worker::{RipEvent, RipJob, RipSource, spawn};
+pub use worker::{RipEvent, RipJob, RipSource, output_paths, spawn};

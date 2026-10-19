@@ -147,6 +147,9 @@ async fn load(State(state): State<Arc<AppState>>, Path(i): Path<usize>) -> Respo
 struct RipRequest {
     #[serde(default)]
     tracks: Vec<u8>,
+    /// Overrides the global force setting for this rip only.
+    #[serde(default)]
+    force: Option<bool>,
 }
 
 async fn rip(
@@ -156,7 +159,8 @@ async fn rip(
 ) -> Response {
     let worker = Arc::clone(&state);
     let tracks = req.tracks;
-    match tokio::task::spawn_blocking(move || worker.rip(i, tracks)).await {
+    let force = req.force;
+    match tokio::task::spawn_blocking(move || worker.rip(i, tracks, force)).await {
         Ok(Ok(())) => (StatusCode::ACCEPTED, Json(state.view())).into_response(),
         Ok(Err(error)) => error_response(error),
         Err(join) => internal(join),

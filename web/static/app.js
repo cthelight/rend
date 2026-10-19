@@ -8,6 +8,9 @@ let activeDrive = null;
 const pending = new Set();
 // Logical index of the drive whose tag editor is open; null when closed.
 let tagsEditorDrive = null;
+// The drive and track selection awaiting a keep/overwrite decision; null when
+// the confirmation dialog is closed.
+let ripConfirm = null;
 // Monotonically increasing; only the newest snapshot may be applied, so an
 // out-of-order response can never restore a stale view.
 let snapshotSeq = 0;
@@ -326,7 +329,7 @@ function buildCard(drive) {
 // (running or finished) each selected track grows a state and progress
 // cell, and the overall bar + summary wrap the table, so the progress
 // never leaves the list of tracks.
-function tocTable(audioTracks, checked, active, titles, rip) {
+function tocTable(audioTracks, checked, active, titles, rip, existingTracks) {
   const all = audioTracks.length > 0 && audioTracks.every((t) => checked.has(t.number));
   // Only the tracks targeted by the rip get a state cell; unselected rows
   // stay plain, their checkbox already says they were not part of it.
@@ -385,11 +388,18 @@ function tocTable(audioTracks, checked, active, titles, rip) {
                 >
               </td>
               <td class="col-num">${track.number}</td>
-              <td class="title">${
-                title
-                  ? escapeHtml(title)
-                  : `<span class="track-fallback">Track ${track.number}</span>`
-              }</td>
+              <td class="title">
+                ${
+                  title
+                    ? escapeHtml(title)
+                    : `<span class="track-fallback">Track ${track.number}</span>`
+                }
+                ${
+                  existingTracks.has(track.number)
+                    ? '<span class="exists-badge" title="output files already exist">exists</span>'
+                    : ""
+                }
+              </td>
               <td class="col-dur">${duration(track.durationSecs)}</td>
               ${
                 inRip
@@ -453,6 +463,11 @@ function updateTocSlot(record, drive, active) {
   // Which rows carry rip cells changes the table shape, so the selected
   // set is part of the render key; per-track state updates are incremental.
   const ripKey = rip ? rip.tracks.join(",") : "none";
+  const existingTracks = new Set(drive.existingTracks ?? []);
+  const existingKey = audioTracks
+    .filter((track) => existingTracks.has(track.number))
+    .map((track) => track.number)
+    .join(",");
 
   if (!drive.toc) {
     record.tocKey = null;
@@ -466,10 +481,10 @@ function updateTocSlot(record, drive, active) {
     record.tocRenderKey = null;
   }
   const selected = active ? new Set(rip.tracks) : record.checked;
-  const renderKey = `${numbersKey}|${titleKey}|${ripKey}`;
+  const renderKey = `${numbersKey}|${titleKey}|${ripKey}|${existingKey}`;
   if (record.tocRenderKey !== renderKey) {
     record.tocRenderKey = renderKey;
-    slot.innerHTML = tocTable(audioTracks, selected, active, titles, rip);
+    slot.innerHTML = tocTable(audioTracks, selected, active, titles, rip, existingTracks);
   }
   syncTocSlot(slot, audioTracks, selected, active);
   syncRipSlot(slot, rip);
@@ -705,6 +720,50 @@ function closeTagsEditor() {
   document
     .querySelector(`.drive[data-index="${index}"] [data-action="edit-tags"]`)
     ?.focus();
+}
+
+async function startRip(index, tracks, force) {
+  if (pending.has(index)) return;
+  pending.add(index);
+  try {
+    const body = { tracks };
+    if (force !== null && force !== undefined) body.force = force;
+    const seq = ++snapshotSeq;
+    applySnapshot(seq, await post(`/api/drives/${index}/rip`, body));
+  } catch (error) {
+    addLog(error.message);
+  } finally {
+    pending.delete(index);
+    render();
+  }
+}
+
+function openRipConfirm(index, tracks) {
+  if (ripConfirm) return;
+  ripConfirm = { index, tracks };
+  const count = tracks.length;
+  $("#rip-confirm-count").textContent =
+    count === 1 ? "1 track" : `${count} tracks`;
+  $("#rip-confirm-modal").classList.remove("hidden");
+  $("#rip-confirm-overwrite")?.focus();
+}
+
+function closeRipConfirm() {
+  if (!ripConfirm) return;
+  const index = ripConfirm.index;
+  ripConfirm = null;
+  $("#rip-confirm-modal").classList.add("hidden");
+  document
+    .querySelector(`.drive[data-index="${index}"] [data-action="rip"]`)
+    ?.focus();
+}
+
+async function confirmRip(force) {
+  const current = ripConfirm;
+  if (!current || pending.has(current.index)) return;
+  const { index, tracks } = current;
+  closeRipConfirm();
+  await startRip(index, tracks, force);
 }
 
 // Incrementally paints the rip state onto the track table: the overall
@@ -1071,21 +1130,29 @@ function bindDelegated() {
         coverFromUrl(index);
         return;
       }
+      if (action === "rip") {
+        const tracks = [...card.querySelectorAll('input[data-track]:checked')].map(
+          (input) => Number(input.dataset.track)
+        );
+        if (!tracks.length) {
+          addLog("select at least one track to rip");
+          return;
+        }
+        const drive = state.drives.find((candidate) => candidate.index === index);
+        const existingTracks = new Set(drive?.existingTracks ?? []);
+        const overlaps = tracks.some((track) => existingTracks.has(track));
+        if (drive && !state.force && overlaps) {
+          openRipConfirm(index, tracks);
+        } else {
+          await startRip(index, tracks, null);
+        }
+        return;
+      }
       pending.add(index);
       try {
         if (action === "load") {
           const seq = ++snapshotSeq;
           applySnapshot(seq, await post(`/api/drives/${index}/load`));
-        } else if (action === "rip") {
-          const tracks = [...card.querySelectorAll('input[data-track]:checked')].map(
-            (input) => Number(input.dataset.track)
-          );
-          if (!tracks.length) {
-            addLog("select at least one track to rip");
-            return;
-          }
-          const seq = ++snapshotSeq;
-          applySnapshot(seq, await post(`/api/drives/${index}/rip`, { tracks }));
         } else if (action === "stop") {
           const seq = ++snapshotSeq;
           applySnapshot(seq, await post(`/api/drives/${index}/stop`));
@@ -1206,6 +1273,14 @@ function bindDelegated() {
       closeTagsEditor();
     }
   });
+  const ripModal = $("#rip-confirm-modal");
+  ripModal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-close-modal]") || event.target === ripModal) {
+      closeRipConfirm();
+    }
+  });
+  $("#rip-confirm-keep").addEventListener("click", () => confirmRip(false));
+  $("#rip-confirm-overwrite").addEventListener("click", () => confirmRip(true));
   modal.addEventListener("submit", async (event) => {
     const form = event.target.closest("form[data-tags]");
     if (!form) return;
@@ -1243,7 +1318,10 @@ function bindDelegated() {
     }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeTagsEditor();
+    if (event.key === "Escape") {
+      closeTagsEditor();
+      closeRipConfirm();
+    }
   });
 }
 

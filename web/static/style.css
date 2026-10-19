@@ -1216,6 +1216,32 @@ input[type="text"]:focus {
   border-top: 1px solid var(--border-soft);
 }
 
+.modal--sm {
+  width: min(460px, 100%);
+}
+
+.rip-confirm-text {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.92rem;
+}
+
+.exists-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.45rem;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--amber);
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  vertical-align: middle;
+}
+
 /* ---------- rip (merged into the track table) ---------- */
 
 .rip-overall {

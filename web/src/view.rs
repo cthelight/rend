@@ -65,6 +65,9 @@ pub struct DriveView {
     /// the Cover Art Archive.
     pub cover_custom: bool,
     pub rip: Option<RipView>,
+    /// Track numbers that already have output files for the selected
+    /// formats, so the frontend can offer an explicit re-rip.
+    pub existing_tracks: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -443,6 +446,7 @@ mod tests {
                 cover_fetching: false,
                 cover_custom: false,
                 rip: None,
+                existing_tracks: Vec::new(),
             }),
         };
         let json = serde_json::to_value(&ev).unwrap();

@@ -23,7 +23,7 @@ use rend_meta::{
 use rend_rip::demo::{
     DEMO_DEVICE, DEMO_LABEL, DEMO_MCN, DemoDisc, DemoSource, demo_cover, demo_meta_all,
 };
-use rend_rip::{RipEvent, RipJob, RipSource, spawn};
+use rend_rip::{RipEvent, RipJob, RipSource, output_paths, spawn};
 use tokio::sync::broadcast;
 
 use crate::view::{
@@ -415,9 +415,50 @@ impl AppState {
             drives: drives
                 .iter()
                 .enumerate()
-                .map(|(index, drive)| drive.view(index))
+                .map(|(index, drive)| {
+                    let mut view = drive.view(index);
+                    view.existing_tracks = self.existing_tracks(&drives, index, &settings);
+                    view
+                })
                 .collect(),
         }
+    }
+
+    /// The output directory a rip on this drive would write into.
+    fn drive_out_dir(&self, drives: &[Drive], index: usize) -> Option<PathBuf> {
+        let drive = drives.get(index)?;
+        let per_drive = self.drive_dirs.unwrap_or(drives.len() > 1);
+        Some(if per_drive {
+            let name = drive.path.rsplit('/').next().unwrap_or("drive").to_string();
+            self.out_dir.join(name)
+        } else {
+            self.out_dir.clone()
+        })
+    }
+
+    /// The audio track numbers whose output files already exist for the
+    /// currently selected formats.
+    fn existing_tracks(&self, drives: &[Drive], index: usize, settings: &Settings) -> Vec<u8> {
+        let (Some(drive), Some(out_dir)) = (drives.get(index), self.drive_out_dir(drives, index))
+        else {
+            return Vec::new();
+        };
+        let Some(toc) = &drive.toc else {
+            return Vec::new();
+        };
+        let tracks: Vec<u8> = toc.audio_tracks().map(|track| track.number).collect();
+        output_paths(
+            toc,
+            &out_dir,
+            &drive.meta,
+            &settings.template,
+            &settings.formats,
+            &tracks,
+        )
+        .into_iter()
+        .filter(|(_, paths)| paths.iter().any(|path| path.exists()))
+        .map(|(number, _)| number)
+        .collect()
     }
 
     pub fn events_receiver(&self) -> broadcast::Receiver<ServerEvent> {
@@ -684,12 +725,17 @@ impl AppState {
         Ok(())
     }
 
-    pub fn rip(&self, index: usize, requested: Vec<u8>) -> Result<(), ApiError> {
+    pub fn rip(
+        &self,
+        index: usize,
+        requested: Vec<u8>,
+        force_override: Option<bool>,
+    ) -> Result<(), ApiError> {
         let (formats, force, template) = {
             let settings = self.settings_guard();
             (
                 settings.formats.clone(),
-                settings.force,
+                force_override.unwrap_or(settings.force),
                 settings.template.clone(),
             )
         };
@@ -1427,8 +1473,13 @@ impl AppState {
 
     fn drive_changed(&self, index: usize) {
         let drive = {
+            let settings = self.settings_guard();
             let drives = self.drives_guard();
-            drives.get(index).map(|drive| drive.view(index))
+            drives.get(index).map(|drive| {
+                let mut view = drive.view(index);
+                view.existing_tracks = self.existing_tracks(&drives, index, &settings);
+                view
+            })
         };
         if let Some(drive) = drive {
             self.emit(ServerEvent::DriveChanged {
@@ -1625,6 +1676,7 @@ impl Drive {
             cover_fetching: self.cover_fetching,
             cover_custom: self.cover_custom,
             rip: self.rip.as_ref().map(RipControl::view),
+            existing_tracks: Vec::new(),
         }
     }
 }
@@ -2117,7 +2169,7 @@ mod tests {
     fn rejects_unknown_tracks() {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), false);
-        assert!(state.rip(0, vec![9]).is_err());
+        assert!(state.rip(0, vec![9], None).is_err());
     }
 
     #[test]
@@ -2125,8 +2177,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), true);
 
-        state.rip(0, vec![1]).unwrap();
-        assert!(state.rip(0, vec![1]).is_err());
+        state.rip(0, vec![1], None).unwrap();
+        assert!(state.rip(0, vec![1], None).is_err());
         state.stop_rip(0).unwrap();
         wait_idle(&state, 0);
     }
@@ -2136,7 +2188,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), true);
 
-        state.rip(0, vec![3]).unwrap();
+        state.rip(0, vec![3], None).unwrap();
         wait_idle(&state, 0);
 
         let path = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
@@ -2152,11 +2204,40 @@ mod tests {
     }
 
     #[test]
+    fn existing_tracks_report_existing_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        let path = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+
+        let view = state.view();
+        assert_eq!(view.drives[0].existing_tracks, vec![3]);
+    }
+
+    #[test]
+    fn force_override_allows_a_one_off_re_rip() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = demo_state(dir.path(), false);
+
+        let path = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+
+        state.rip(0, vec![3], Some(true)).unwrap();
+        wait_idle(&state, 0);
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+    }
+
+    #[test]
     fn drive_dirs_on_rips_into_a_per_drive_subdir() {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state_with(dir.path(), true, Some(true));
 
-        state.rip(0, vec![3]).unwrap();
+        state.rip(0, vec![3], None).unwrap();
         wait_idle(&state, 0);
 
         let path = dir
@@ -2171,7 +2252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state_with(dir.path(), true, Some(false));
 
-        state.rip(0, vec![3]).unwrap();
+        state.rip(0, vec![3], None).unwrap();
         wait_idle(&state, 0);
 
         let path = dir.path().join("The Demo Band/Demo Album/03 Short One.wav");
@@ -2184,7 +2265,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), true);
 
-        state.rip(0, vec![1]).unwrap();
+        state.rip(0, vec![1], None).unwrap();
         state.stop_rip(0).unwrap();
         wait_idle(&state, 0);
 
@@ -2200,7 +2281,7 @@ mod tests {
         let state = demo_state(dir.path(), true);
 
         state.start();
-        state.rip(0, vec![1]).unwrap();
+        state.rip(0, vec![1], None).unwrap();
         state.shutdown();
 
         let view = state.view();
@@ -2212,7 +2293,7 @@ mod tests {
     fn rejects_duplicate_tracks() {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), false);
-        assert!(state.rip(0, vec![3, 3]).is_err());
+        assert!(state.rip(0, vec![3, 3], None).is_err());
     }
 
     #[test]
@@ -2220,7 +2301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), true);
 
-        state.rip(0, vec![1]).unwrap();
+        state.rip(0, vec![1], None).unwrap();
         assert!(state.load_toc(0).is_err());
         state.stop_rip(0).unwrap();
         wait_idle(&state, 0);
@@ -2231,7 +2312,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = demo_state(dir.path(), true);
 
-        state.rip(0, vec![1]).unwrap();
+        state.rip(0, vec![1], None).unwrap();
         assert!(
             state
                 .set_tags(0, Some("X".into()), None, None, None, vec![])
