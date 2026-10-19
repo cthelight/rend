@@ -22,26 +22,30 @@
       <span class="conn-text">connecting</span>
     </div>
   </header>
-  <nav id="tabs" class="tabs" role="tablist" aria-label="drives"></nav>
-  <main id="drives" class="drives"></main>
-  <section id="empty" class="empty hidden">
-    <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <circle cx="32" cy="32" r="29" stroke="currentColor" stroke-width="2.5"/>
-      <circle cx="32" cy="32" r="9" stroke="currentColor" stroke-width="2.5"/>
-      <circle cx="32" cy="32" r="2.5" fill="currentColor"/>
-    </svg>
-    <h2>No drives detected</h2>
-    <p>
-      Insert a disc into a CD-ROM drive, or start
-      <code>rend-wui --demo</code> with a simulated disc.
-    </p>
-  </section>
-  <section class="log">
-    <div class="log-inner">
-      <h2>Activity</h2>
-      <ol id="log-list"></ol>
+  <div class="layout">
+    <nav id="rail" class="rail" role="tablist" aria-label="drives" aria-orientation="vertical"></nav>
+    <div class="content">
+      <main id="drives" class="drives"></main>
+      <section id="empty" class="empty hidden">
+        <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+          <circle cx="32" cy="32" r="29" stroke="currentColor" stroke-width="2.5"/>
+          <circle cx="32" cy="32" r="9" stroke="currentColor" stroke-width="2.5"/>
+          <circle cx="32" cy="32" r="2.5" fill="currentColor"/>
+        </svg>
+        <h2>No drives detected</h2>
+        <p>
+          Insert a disc into a CD-ROM drive, or start
+          <code>rend-wui --demo</code> with a simulated disc.
+        </p>
+      </section>
+      <section class="log">
+        <div class="log-inner">
+          <h2>Activity</h2>
+          <ol id="log-list"></ol>
+        </div>
+      </section>
     </div>
-  </section>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

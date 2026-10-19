@@ -1,9 +1,9 @@
 let state = null;
 let settingsKey = "";
 const cards = new Map();
-const tabs = new Map();
+const railItems = new Map();
 // The drive index whose card is visible; null until the first snapshot.
-let activeTab = null;
+let activeDrive = null;
 // Card indices with a request in flight; their action buttons are disabled.
 const pending = new Set();
 // Monotonically increasing; only the newest snapshot may be applied, so an
@@ -681,81 +681,140 @@ function updateCard(record, drive) {
   updateRipSlot(record, drive);
 }
 
-function tabIndicator(drive) {
+// What a rail row says about its drive: the status dot, the one-line
+// description of what is in the drive, and a live activity indicator.
+function railInfo(drive) {
   const rip = drive.rip;
   if (rip && rip.active) {
     const { finished, units, fraction } = ripProgress(rip);
     return {
-      classes: "tab--ripping",
-      html: `<span class="bar"><span class="fill" style="width:${Math.round(
+      dot: "busy",
+      sub: `ripping ${finished}/${units}`,
+      ind: `<span class="bar"><span class="fill" style="width:${Math.round(
         fraction * 100
-      )}%"></span></span><span class="tab-count">${finished}/${units}</span>`,
+      )}%"></span></span><span class="rail-count">${finished}/${units}</span>`,
     };
   }
   if (drive.loadingToc || drive.coverFetching || /…$/.test(drive.lookupStatus)) {
-    return { classes: "tab--busy", html: '<span class="spinner"></span>' };
+    return { dot: "busy", sub: drive.status || "working", ind: '<span class="spinner"></span>' };
   }
   if (rip) {
-    const failed = rip.states.filter((track) => track.status === "failed").length;
-    return failed
-      ? {
-          classes: "tab--failed",
-          html: '<span class="dot dot--failed"></span>',
-        }
-      : { classes: "tab--done", html: '<span class="dot dot--done"></span>' };
+    const failed = rip.states.some((track) => track.status === "failed");
+    return {
+      dot: failed ? "err" : "ok",
+      sub: failed ? "rip failed" : "rip done",
+      ind: `<span class="dot ${failed ? "dot--failed" : "dot--done"}"></span>`,
+    };
   }
-  return { classes: "", html: "" };
+  const dot =
+    drive.status === "disc present"
+      ? "ok"
+      : drive.status === "tray open" || drive.status === "not ready"
+        ? "warn"
+        : drive.status === "unreadable"
+          ? "err"
+          : "muted";
+  return {
+    dot,
+    sub:
+      drive.status === "disc present"
+        ? drive.meta?.album || (drive.toc ? "disc loaded" : `${drive.disc || "disc"} disc`)
+        : drive.status || "unknown",
+    ind: "",
+  };
 }
 
-function updateTab(tab, drive) {
-  tab.querySelector(".tab-label").textContent = drive.label;
-  const indicator = tabIndicator(drive);
-  tab.className = `tab ${indicator.classes}`.trim() + (tab.classList.contains("active") ? " active" : "");
-  tab.querySelector(".tab-indicator").innerHTML = indicator.html;
-  tab.title = [drive.status, drive.disc]
+function updateRailItem(item, drive) {
+  item.querySelector(".rail-label").textContent = drive.label;
+  const info = railInfo(drive);
+  item.querySelector(".rail-dot").className = `rail-dot rail-dot--${info.dot}`;
+  item.querySelector(".rail-sub").textContent = info.sub;
+  item.querySelector(".rail-ind").innerHTML = info.ind;
+  item.classList.toggle("rail-item--ripping", Boolean(drive.rip && drive.rip.active));
+  item.title = [drive.status, drive.disc ? `${drive.disc} disc` : "", drive.meta?.album]
     .filter(Boolean)
     .join(" / ");
 }
 
-function renderTabs() {
-  const bar = $("#tabs");
-  bar.classList.toggle("hidden", !state.drives.length);
+function applyActiveRail() {
+  for (const [index, item] of railItems) {
+    const selected = index === activeDrive;
+    item.classList.toggle("active", selected);
+    item.setAttribute("aria-selected", selected ? "true" : "false");
+    item.tabIndex = selected ? 0 : -1;
+  }
+}
+
+function setActiveDrive(index) {
+  if (index === activeDrive) return;
+  activeDrive = index;
+  showActiveCard();
+  applyActiveRail();
+}
+
+// Arrow keys, j/k, Home and End move between drives, following the ARIA
+// tablist pattern (vertical orientation).
+function onRailKeydown(event) {
+  const order = state.drives.map((drive) => drive.index);
+  if (!order.length) return;
+  const current = order.indexOf(activeDrive);
+  let next;
+  if (event.key === "ArrowUp" || event.key === "k") {
+    next = order[(current - 1 + order.length) % order.length];
+  } else if (event.key === "ArrowDown" || event.key === "j") {
+    next = order[(current + 1) % order.length];
+  } else if (event.key === "Home") {
+    next = order[0];
+  } else if (event.key === "End") {
+    next = order[order.length - 1];
+  } else {
+    return;
+  }
+  event.preventDefault();
+  setActiveDrive(next);
+  railItems.get(next)?.focus({ preventScroll: true });
+}
+
+function renderRail() {
+  const rail = $("#rail");
+  rail.classList.toggle("hidden", !state.drives.length);
   const seen = new Set();
   state.drives.forEach((drive) => {
     seen.add(drive.index);
-    let tab = tabs.get(drive.index);
-    if (!tab) {
-      tab = document.createElement("button");
-      tab.type = "button";
-      tab.className = "tab";
-      tab.dataset.index = drive.index;
-      tab.setAttribute("role", "tab");
-      tab.innerHTML = `<span class="tab-label"></span><span class="tab-indicator"></span>`;
-      tabs.set(drive.index, tab);
-      bar.appendChild(tab);
+    let item = railItems.get(drive.index);
+    if (!item) {
+      item = document.createElement("button");
+      item.type = "button";
+      item.className = "rail-item";
+      item.dataset.index = drive.index;
+      item.setAttribute("role", "tab");
+      item.innerHTML = `<span class="rail-dot" aria-hidden="true"></span>
+        <span class="rail-text">
+          <span class="rail-label"></span>
+          <span class="rail-sub"></span>
+        </span>
+        <span class="rail-ind" aria-hidden="true"></span>`;
+      railItems.set(drive.index, item);
+      rail.appendChild(item);
     }
-    updateTab(tab, drive);
+    updateRailItem(item, drive);
   });
-  for (const [index, tab] of tabs) {
+  for (const [index, item] of railItems) {
     if (!seen.has(index)) {
-      tab.remove();
-      tabs.delete(index);
+      item.remove();
+      railItems.delete(index);
     }
   }
-  if (!seen.has(activeTab)) activeTab = null;
-  if (activeTab === null && state.drives.length) {
-    activeTab = state.drives[0].index;
+  if (!seen.has(activeDrive)) activeDrive = null;
+  if (activeDrive === null && state.drives.length) {
+    activeDrive = state.drives[0].index;
   }
-  for (const [index, tab] of tabs) {
-    const selected = index === activeTab;
-    tab.classList.toggle("active", selected);
-    tab.setAttribute("aria-selected", selected ? "true" : "false");
-  }
+  applyActiveRail();
 }
 
 function showActiveCard() {
   for (const [index, record] of cards) {
-    record.card.classList.toggle("hidden", index !== activeTab);
+    record.card.classList.toggle("hidden", index !== activeDrive);
   }
 }
 
@@ -808,7 +867,7 @@ function applyRipEvent(driveId, event) {
 function render() {
   if (!state) return;
   renderSettings();
-  renderTabs();
+  renderRail();
   $("#empty").classList.toggle("hidden", state.drives.length > 0);
   const main = $("#drives");
   const seen = new Set();
@@ -841,19 +900,12 @@ function render() {
 }
 
 function bindDelegated() {
-  $("#tabs").addEventListener("click", (event) => {
-    const tab = event.target.closest(".tab");
-    if (!tab) return;
-    const index = Number(tab.dataset.index);
-    if (index === activeTab) return;
-    activeTab = index;
-    showActiveCard();
-    for (const [tabIndex, element] of tabs) {
-      const selected = tabIndex === activeTab;
-      element.classList.toggle("active", selected);
-      element.setAttribute("aria-selected", selected ? "true" : "false");
-    }
+  $("#rail").addEventListener("click", (event) => {
+    const item = event.target.closest(".rail-item");
+    if (!item) return;
+    setActiveDrive(Number(item.dataset.index));
   });
+  $("#rail").addEventListener("keydown", onRailKeydown);
   const settings = $("#settings");
   settings.addEventListener("click", async (event) => {
     const button = event.target.closest(".seg-btn");

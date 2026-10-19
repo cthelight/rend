@@ -240,15 +240,19 @@ toggles. A selected format that has quality options grows a quality
 selector attached to its toggle, so a format and its quality are chosen
 together in one control.
 
-Each discovered drive gets a tab in the tab bar; select one to see its
-table of contents, MusicBrainz candidate matches and cover art, editable
-disc and track tags, and rip controls. The tabs carry live progress
-indicators: a spinner while the TOC or metadata is being read, and a
-progress bar with a track count while a rip is running. Drive state and
-per-track rip progress are pushed over a server-sent events stream, so
-the page updates without polling. As with the TUI, several drives can
-rip at the same time, and multi-drive rips write to per-device
-subdirectories of the output path.
+Every discovered drive is listed in the drive rail on the left, all of
+them at once. Each row shows the drive, what is in it (the album when the
+disc is identified, otherwise the disc type or an empty/ready state), and
+what it is doing right now: a spinner while the TOC or metadata is being
+read, a live progress bar with a track count while a rip is running, and
+a done/failed dot afterwards. Select a row — click, or `↑`/`↓`, `j`/`k`,
+`Home`/`End` while the rail is focused — to open that drive's workspace:
+its table of contents, MusicBrainz candidate matches and cover art,
+editable disc and track tags, and rip controls. Drive state and per-track
+rip progress are pushed over a server-sent events stream, so the page
+updates without polling. As with the TUI, several drives can rip at the
+same time, and multi-drive rips write to per-device subdirectories of the
+output path.
 
 ## Development
 
