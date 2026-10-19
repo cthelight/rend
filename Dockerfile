@@ -74,11 +74,13 @@ COPY --from=builder /usr/local/bin/rend-wui /usr/local/bin/rend-wui
 # child process are both resolved through it. Without this, startup depends
 # on the container runtime's default path.
 ENV PATH=/usr/local/bin:/usr/bin:/bin
+# Bind on all interfaces — but as an environment default, the
+# lowest-precedence setting, so --host, -e REND_WUI_HOST=…, and
+# REND_WUI_PORT still take effect. (The port keeps its built-in default,
+# 3000, which EXPOSE documents.)
+ENV REND_WUI_HOST=0.0.0.0
 ENV REND_WUI_OUTPUT_DIR=/output
 WORKDIR /output
 EXPOSE 3000
 VOLUME ["/output"]
-# The host is pinned in the entrypoint (not the command) so that extra flags
-# passed to `docker run` — which replace the command — cannot override it
-# and bind the server to 127.0.0.1, unreachable outside the container.
-ENTRYPOINT ["rend-wui", "--host", "0.0.0.0"]
+ENTRYPOINT ["rend-wui"]

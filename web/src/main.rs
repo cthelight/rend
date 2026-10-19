@@ -13,10 +13,10 @@ use tokio::net::TcpListener;
 #[derive(Parser)]
 #[command(name = "rend-wui", about = "Serve the rend web UI")]
 struct Cli {
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1", env = "REND_WUI_HOST")]
     host: String,
 
-    #[arg(long, default_value_t = 3000)]
+    #[arg(long, default_value_t = 3000, env = "REND_WUI_PORT")]
     port: u16,
 
     /// Only rip this device.

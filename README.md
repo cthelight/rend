@@ -232,6 +232,8 @@ as a service:
 - `REND_WUI_DRIVE_DIRS` — `true` or `false`: always or never rip each
   drive into its own subdirectory of the output dir. Without it, drives
   get their own subdirectory only when several rip at once
+- `REND_WUI_HOST` — the address to bind the server to (`--host`)
+- `REND_WUI_PORT` — the port to bind the server to (`--port`)
 
 A flag given on the command line overrides the environment.
 
@@ -281,9 +283,11 @@ docker run -d --name rend \
     rend-wui:local
 ```
 
-Inside the container the server listens on `0.0.0.0:3000` and writes to
-`/output` (override with `-o` or `REND_WUI_OUTPUT_DIR`); every other flag
-and `REND_WUI_*` environment variable works as described above. The image
+Inside the container the server binds `0.0.0.0:3000` by default and writes
+to `/output`; the host is an environment default (`REND_WUI_HOST`) that
+`--host`, `--port`, or `REND_WUI_PORT` override, `-o` and
+`REND_WUI_OUTPUT_DIR` move the output, and every other flag and
+`REND_WUI_*` environment variable works as described above. The image
 is built for x86_64. Metadata lookup still needs outbound internet access
 and stays best effort — without it, rips are simply written untagged.
 
