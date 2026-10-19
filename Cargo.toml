@@ -22,6 +22,7 @@ assert_cmd = "2"
 predicates = "3"
 sha1 = "0.10"
 tempfile = "3"
+unicode-normalization = "0.1"
 
 [profile.release]
 lto = true

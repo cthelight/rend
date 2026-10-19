@@ -5,11 +5,15 @@
 //! `<artist>/<album>/<number> <title>`, puts each track in a per-artist,
 //! per-album directory as `<NN> <title>.<ext>`: the release artist's
 //! directory, the album's directory, the track's number zero-padded to two
-//! digits, a space, and the title. Every name component is sanitized: any
-//! character that is not alphanumeric, a space, an underscore, a period,
-//! or a dash is replaced with `_`, so the names stay safe on SMB shares.
+//! digits, a space, and the title. Every name component is sanitized so the
+//! names stay ASCII and safe on SMB shares: non-ASCII text is folded to an
+//! ASCII approximation where one exists (`café` → `cafe`, `ﬁ` → `fi`),
+//! anything that still cannot be represented is replaced with `_`, and runs
+//! of underscores are collapsed.
 
 use std::path::{Path, PathBuf};
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::lookup::{DiscMeta, TrackMeta};
 
@@ -209,24 +213,76 @@ fn parse_part(part: &str) -> Result<Vec<Segment>, ParseError> {
     Ok(segments)
 }
 
-/// Replaces every character that is not alphanumeric, a space, an
-/// underscore, a period, or a dash with `_`. Trailing dots and spaces are
-/// dropped, since Windows silently removes them.
+/// Reduces a name component to ASCII.
+///
+/// ASCII alphanumerics, spaces, underscores, periods, and dashes are kept.
+/// A non-ASCII character is first reduced to its ASCII-compatible form, if
+/// it has one; a character with no ASCII approximation becomes `_`. Runs of
+/// underscores are collapsed, and trailing dots and spaces are dropped,
+/// since Windows silently removes them.
 pub fn sanitize(name: &str) -> String {
-    let mut out: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-') {
-                c
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii() {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-') {
+                out.push(c);
             } else {
-                '_'
+                out.push('_');
             }
+            continue;
+        }
+        match ascii_fold(c) {
+            Some(folded) => out.push_str(&folded),
+            None => out.push('_'),
+        }
+    }
+    let mut compacted = String::with_capacity(out.len());
+    for c in out.chars() {
+        if c == '_' && compacted.ends_with('_') {
+            continue;
+        }
+        compacted.push(c);
+    }
+    while compacted.ends_with('.') || compacted.ends_with(' ') {
+        compacted.pop();
+    }
+    compacted
+}
+
+/// The ASCII approximation of a single non-ASCII character, if it has one.
+fn ascii_fold(c: char) -> Option<String> {
+    if let Some(fixed) = fixed_fold(c) {
+        return Some(fixed.to_string());
+    }
+    let mut buf = [0u8; 4];
+    let ascii: String = c
+        .encode_utf8(&mut buf)
+        .nfkd()
+        .filter(|c| {
+            c.is_ascii() && (c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-'))
         })
         .collect();
-    while out.ends_with('.') || out.ends_with(' ') {
-        out.pop();
+    if ascii.is_empty() { None } else { Some(ascii) }
+}
+
+/// Characters that have no NFKD decomposition into ASCII but still have a
+/// conventional ASCII spelling.
+fn fixed_fold(c: char) -> Option<&'static str> {
+    match c as u32 {
+        0x00C6 => Some("AE"),
+        0x00D8 => Some("O"),
+        0x00DE => Some("D"),
+        0x00E6 => Some("ae"),
+        0x00F0 => Some("d"),
+        0x00F8 => Some("o"),
+        0x00DF => Some("ss"),
+        0x00FE => Some("th"),
+        0x0132 => Some("IJ"),
+        0x0133 => Some("ij"),
+        0x0152 => Some("OE"),
+        0x0153 => Some("oe"),
+        _ => None,
     }
-    out
 }
 
 #[cfg(test)]
@@ -290,8 +346,23 @@ mod tests {
     fn sanitize_leaves_safe_names_alone() {
         assert_eq!(sanitize("Josh_Groban"), "Josh_Groban");
         assert_eq!(sanitize("Gems"), "Gems");
-        // Non-ASCII alphanumerics survive.
-        assert_eq!(sanitize("Éclair-café-5"), "Éclair-café-5");
+    }
+
+    #[test]
+    fn sanitize_folds_non_ascii_to_ascii() {
+        assert_eq!(sanitize("Éclair-café-5"), "Eclair-cafe-5");
+        assert_eq!(sanitize("naïve façade"), "naive facade");
+        assert_eq!(sanitize("Æther-Øvr-ßand"), "AEther-Ovr-ssand");
+        assert_eq!(sanitize("fin ﬁnale"), "fin finale");
+        assert_eq!(sanitize("①st"), "1st");
+    }
+
+    #[test]
+    fn sanitize_replaces_unfoldable_non_ascii_with_underscores() {
+        assert_eq!(sanitize("日本語"), "_");
+        assert_eq!(sanitize("привет"), "_");
+        assert_eq!(sanitize("a—b"), "a_b");
+        assert_eq!(sanitize("a——b"), "a_b");
     }
 
     #[test]

@@ -13,6 +13,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 sha1.workspace = true
 ureq.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 rend-encode = { path = "../encode" }
