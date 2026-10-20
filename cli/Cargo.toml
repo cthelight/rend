@@ -10,7 +10,7 @@ rend-core = { path = "../core" }
 rend-encode = { path = "../encode" }
 rend-meta = { path = "../meta" }
 rend-rip = { path = "../rip" }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

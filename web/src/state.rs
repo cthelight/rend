@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use rend_core::{Device, DeviceInfo, DriveStatus, Toc};
+use rend_core::{Device, DeviceInfo, DriveNames, DriveStatus, Toc, drive_label};
 use rend_encode::{Format, FormatSet, QualityKind};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, fetch_image,
@@ -95,6 +95,8 @@ pub struct Drive {
     pub status: String,
     pub disc: Option<String>,
     pub demo: bool,
+    /// Friendly names this drive may be known by.
+    names: DriveNames,
     pub loading_toc: bool,
     /// The last TOC read failed; don't auto-retry on every poll.
     pub toc_failed: bool,
@@ -204,6 +206,7 @@ impl AppState {
         selected_formats: Vec<Format>,
         force: bool,
         template: Template,
+        drive_names: DriveNames,
         drive_dirs: Option<bool>,
         demo: bool,
     ) -> Result<Arc<Self>, String> {
@@ -219,7 +222,10 @@ impl AppState {
                 },
                 None => Device::discover().unwrap_or_default(),
             };
-            devices.into_iter().map(Drive::real).collect()
+            devices
+                .into_iter()
+                .map(|device| Drive::real(device, drive_names.clone()))
+                .collect()
         };
         let state = Arc::new(Self {
             drives: Mutex::new(drives),
@@ -1530,13 +1536,14 @@ impl AppState {
 }
 
 impl Drive {
-    fn real(device: Device) -> Self {
+    fn real(device: Device, names: DriveNames) -> Self {
         let mut drive = Self {
             path: device.path().to_string(),
             label: "unknown".to_string(),
             status: String::new(),
             disc: None,
             demo: false,
+            names,
             loading_toc: false,
             toc_failed: false,
             toc: None,
@@ -1571,6 +1578,7 @@ impl Drive {
             status: DriveStatus::DiscOk.to_string(),
             disc: Some("audio".to_string()),
             demo: true,
+            names: DriveNames::default(),
             loading_toc: false,
             toc_failed: false,
             toc: Some(toc.clone()),
@@ -1604,7 +1612,7 @@ impl Drive {
     fn apply_info(&mut self, info: Option<DeviceInfo>) {
         match info {
             Some(info) => {
-                self.label = drive_label(&info);
+                self.label = drive_label(&self.names, &info);
                 self.status = info.drive_status.to_string();
                 self.disc = info.disc_status.map(|status| status.to_string());
                 self.last_status = Some(info.drive_status);
@@ -1888,25 +1896,6 @@ fn blank_meta() -> DiscMeta {
     }
 }
 
-fn drive_label(info: &DeviceInfo) -> String {
-    let vendor = info.vendor.as_deref().unwrap_or("").trim();
-    let model = info.model.as_deref().unwrap_or("unknown").trim();
-    let mut label = if vendor.is_empty() {
-        model.to_string()
-    } else {
-        format!("{vendor} {model}")
-    };
-    if let Some(version) = info
-        .version
-        .as_deref()
-        .map(str::trim)
-        .filter(|version| !version.is_empty())
-    {
-        label.push_str(&format!(" v{version}"));
-    }
-    label
-}
-
 fn disc_toc(toc: &Toc) -> DiscToc {
     DiscToc {
         offsets: toc.audio_tracks().map(|track| track.start_lba).collect(),
@@ -1959,6 +1948,7 @@ mod tests {
             vec![Format::parse("wav").unwrap()],
             force,
             Template::default(),
+            DriveNames::default(),
             drive_dirs,
             true,
         )
@@ -2009,6 +1999,7 @@ mod tests {
             vec![Format::parse("wav").unwrap()],
             false,
             Template::default(),
+            DriveNames::default(),
             None,
             true,
         )
@@ -2336,6 +2327,7 @@ mod tests {
             status: "disc present".into(),
             disc: Some("audio".into()),
             demo: false,
+            names: DriveNames::default(),
             loading_toc: false,
             toc_failed: false,
             toc: Some(DemoDisc::new().toc),

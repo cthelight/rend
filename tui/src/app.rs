@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
 
-use rend_core::{Device, DeviceInfo, DriveStatus, FRAME_SIZE, Toc};
+use rend_core::{Device, DriveNames, DriveStatus, FRAME_SIZE, Toc, drive_label};
 use rend_encode::{Format, FormatSet};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
@@ -187,6 +187,8 @@ pub struct Drive {
     /// The album matched to this drive's loaded disc, remembered so the
     /// drives panel can show each drive's album at a glance.
     pub album: Option<String>,
+    /// Friendly names this drive may be known by.
+    names: DriveNames,
     device: Option<Device>,
     last_status: Option<DriveStatus>,
     #[cfg(test)]
@@ -194,13 +196,14 @@ pub struct Drive {
 }
 
 impl Drive {
-    fn real(device: Device) -> Self {
+    fn real(device: Device, names: DriveNames) -> Self {
         let mut drive = Self {
             path: device.path().to_string(),
             label: "unknown".into(),
             status: String::new(),
             disc: None,
             album: None,
+            names,
             device: Some(device),
             last_status: None,
             #[cfg(test)]
@@ -217,6 +220,7 @@ impl Drive {
             status: "disc present".into(),
             disc: Some("audio".into()),
             album: None,
+            names: DriveNames::default(),
             device: None,
             last_status: Some(DriveStatus::DiscOk),
             #[cfg(test)]
@@ -248,7 +252,7 @@ impl Drive {
         };
         match device.info() {
             Ok(info) => {
-                self.label = drive_label(&info);
+                self.label = drive_label(&self.names, &info);
                 self.status = info.drive_status.to_string();
                 self.disc = info.disc_status.map(|d| d.to_string());
                 self.last_status = Some(info.drive_status);
@@ -265,25 +269,6 @@ impl Drive {
             None => Err("cannot eject the simulated drive".into()),
         }
     }
-}
-
-fn drive_label(info: &DeviceInfo) -> String {
-    let vendor = info.vendor.as_deref().unwrap_or("").trim();
-    let model = info.model.as_deref().unwrap_or("unknown").trim();
-    let mut label = if vendor.is_empty() {
-        model.to_string()
-    } else {
-        format!("{vendor} {model}")
-    };
-    if let Some(version) = info
-        .version
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        label.push_str(&format!(" v{version}"));
-    }
-    label
 }
 
 /// Opens the drive and reads its table of contents and catalog number.
@@ -493,6 +478,7 @@ pub struct App {
 
 impl App {
     /// Creates the app, discovering drives (or the simulated drive).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: Option<&str>,
         out_dir: PathBuf,
@@ -500,6 +486,7 @@ impl App {
         formats: FormatSet,
         selected_formats: Vec<Format>,
         template: Template,
+        drive_names: DriveNames,
         demo: bool,
     ) -> Self {
         let selected_formats = if selected_formats.is_empty() {
@@ -569,7 +556,10 @@ impl App {
                     }
                 },
             };
-            app.drives = devices.into_iter().map(Drive::real).collect();
+            app.drives = devices
+                .into_iter()
+                .map(|dev| Drive::real(dev, drive_names.clone()))
+                .collect();
         }
 
         if !app.drives.is_empty() {
@@ -1836,6 +1826,7 @@ mod tests {
             formats,
             vec![Format::default()],
             Template::default(),
+            DriveNames::default(),
             true,
         )
     }
@@ -2530,6 +2521,7 @@ mod tests {
             FormatSet::probe(),
             vec![Format::default()],
             Template::default(),
+            DriveNames::default(),
             false,
         );
         // Selected while empty: the (asynchronous) TOC read failed.

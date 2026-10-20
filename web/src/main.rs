@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use rend_core::DriveNames;
 use rend_encode::FormatSet;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 use rend_wui::api::router;
@@ -49,8 +50,19 @@ struct Cli {
     drive_dirs: Option<bool>,
 
     /// Overwrite existing output files.
-    #[arg(short = 'f', long)]
+    #[arg(short, long)]
     force: bool,
+
+    /// Friendly name for a drive, as `DRIVE=NAME` (repeatable; `sr0`
+    /// or `/dev/sr0`), replacing the vendor and model. Also
+    /// `REND_DRIVE_NAMES`, comma-separated pairs.
+    #[arg(
+        long = "drive-name",
+        value_name = "DRIVE=NAME",
+        value_delimiter = ',',
+        env = "REND_DRIVE_NAMES"
+    )]
+    drive_names: Vec<String>,
 
     /// Use the built-in simulated disc instead of real devices.
     #[arg(long)]
@@ -84,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         vec![formats.default_format()]
     };
+    let drive_names = DriveNames::from_pairs(&cli.drive_names)?;
     let state = AppState::new(
         cli.output_dir,
         cli.device.as_deref(),
@@ -91,6 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected_formats,
         cli.force,
         template,
+        drive_names,
         cli.drive_dirs,
         cli.demo,
     )?;

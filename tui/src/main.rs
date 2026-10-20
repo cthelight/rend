@@ -20,6 +20,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use rend_core::DriveNames;
 use rend_encode::FormatSet;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 
@@ -69,6 +70,17 @@ struct Cli {
     #[arg(short, long)]
     force: bool,
 
+    /// Friendly name for a drive, as `DRIVE=NAME` (repeatable; `sr0`
+    /// or `/dev/sr0`), replacing the vendor and model. Also
+    /// `REND_DRIVE_NAMES`, comma-separated pairs.
+    #[arg(
+        long = "drive-name",
+        value_name = "DRIVE=NAME",
+        value_delimiter = ',',
+        env = "REND_DRIVE_NAMES"
+    )]
+    drive_names: Vec<String>,
+
     /// Run against a simulated disc (no hardware required).
     #[arg(long)]
     demo: bool,
@@ -92,6 +104,8 @@ fn run(cli: &Cli) -> io::Result<()> {
     let selected = formats
         .resolve_many(&cli.formats, cli.quality.as_deref())
         .map_err(io::Error::other)?;
+    let drive_names = DriveNames::from_pairs(&cli.drive_names)
+        .map_err(|e| io::Error::other(format!("invalid --drive-name: {e}")))?;
     let mut app = App::new(
         cli.device.as_deref(),
         cli.output_dir.clone(),
@@ -99,6 +113,7 @@ fn run(cli: &Cli) -> io::Result<()> {
         formats,
         selected,
         template,
+        drive_names,
         cli.demo,
     );
     let mut terminal = setup_terminal()?;

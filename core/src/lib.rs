@@ -9,6 +9,7 @@ pub mod audio;
 pub mod device;
 pub mod error;
 pub mod msf;
+pub mod names;
 pub mod sys;
 pub mod toc;
 
@@ -16,4 +17,5 @@ pub use audio::{AudioStatus, CddaStream, FRAME_SIZE, FRAMES_PER_SECOND, FrameSou
 pub use device::{Device, DeviceInfo, DiscStatus, DriveStatus};
 pub use error::Error;
 pub use msf::Msf;
+pub use names::{DriveNames, drive_label};
 pub use toc::{Toc, Track, TrackType};

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::Parser;
-use rend_core::{Device, Error, FRAMES_PER_SECOND, Toc};
+use rend_core::{Device, DriveNames, Error, FRAMES_PER_SECOND, Toc, drive_label};
 use rend_encode::{Format, FormatSet};
 use rend_meta::{
     Candidate, DEFAULT_TEMPLATE, DiscMeta, DiscToc, MetaCache, Template, cover_art, disc_id,
@@ -29,7 +29,18 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum Command {
     /// List CD-ROM devices.
-    Drives,
+    Drives {
+        /// Friendly name for a drive, as `DRIVE=NAME` (repeatable; `sr0`
+        /// or `/dev/sr0`), replacing the vendor and model. Also
+        /// `REND_DRIVE_NAMES`, comma-separated pairs.
+        #[arg(
+            long = "drive-name",
+            value_name = "DRIVE=NAME",
+            value_delimiter = ',',
+            env = "REND_DRIVE_NAMES"
+        )]
+        drive_names: Vec<String>,
+    },
     /// Show the table of contents of the disc.
     Toc,
     /// Rip audio tracks to the selected output formats (across several drives in parallel).
@@ -103,7 +114,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
-        Command::Drives => cmd_drives(),
+        Command::Drives { drive_names } => cmd_drives(&drive_names),
         Command::Toc => cmd_toc(single_device(&cli.devices)?),
         Command::Rip { args } => cmd_rip(&cli.devices, &args),
         Command::Info { matches, r#match } => {
@@ -156,28 +167,18 @@ fn open_device(path: Option<&str>) -> Result<Device, Error> {
     }
 }
 
-fn cmd_drives() -> Result<(), Error> {
+fn cmd_drives(drive_names: &[String]) -> Result<(), Error> {
+    // Parsed before discovery so a malformed pair fails even with no
+    // hardware present.
+    let names = DriveNames::from_pairs(drive_names)
+        .map_err(|e| Error::Unexpected(format!("invalid --drive-name: {e}")))?;
     let devices = Device::discover()?;
     if devices.is_empty() {
         return Err(Error::NoDevices);
     }
     for dev in &devices {
         let info = dev.info()?;
-        let vendor = info.vendor.as_deref().unwrap_or("").trim();
-        let model = info.model.as_deref().unwrap_or("unknown").trim();
-        let mut label = if vendor.is_empty() {
-            model.to_string()
-        } else {
-            format!("{vendor} {model}")
-        };
-        if let Some(version) = info
-            .version
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            label.push_str(&format!(" v{version}"));
-        }
+        let label = drive_label(&names, &info);
         println!("{:<10} {:<36} {}", info.path, label, info.drive_status);
     }
     Ok(())

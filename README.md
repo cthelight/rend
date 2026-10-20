@@ -40,7 +40,15 @@ rend rip --match 2             # rip tagged with the second candidate match
 rend eject                     # eject the disc
 
 rend -d /dev/sr1 toc           # use a specific device (default: first found)
+rend drives --drive-name 'sr0=Living Room'   # label /dev/sr0 with a friendly name
 ```
+
+Drives are listed by vendor and model. `--drive-name DRIVE=NAME` (repeatable;
+`sr0` and `/dev/sr0` both name the same drive) shows a friendly name instead,
+and `REND_DRIVE_NAMES` does the same from the environment as
+comma-separated pairs (e.g. `sr0=Living Room,sr1=Office`). A flag given on
+the command line overrides the environment. The flag and the variable also
+work with `rend-tui` and `rend-wui`.
 
 Ripped files are named after the looked-up metadata when it is available:
 each track goes into a per-artist, per-album directory as
@@ -139,6 +147,7 @@ rend-tui -o ~/rips -f          # rip to ~/rips, overwriting existing files
 rend-tui -F flac -F mp3:192    # rip to FLAC and 192 kbps MP3
 rend-tui -F wav                # rip to WAV
 rend-tui -T '<year>/<album>/<number> <title>'   # custom naming template
+rend-tui --drive-name 'sr0=Living Room'   # label the drive with a friendly name
 rend-tui --demo                # simulated disc, no hardware required
 ```
 
@@ -217,6 +226,7 @@ rend-wui -o ~/rips -f          # rip to ~/rips, overwriting existing files
 rend-wui -F flac -F mp3:192    # rip to FLAC and 192 kbps MP3
 rend-wui -F wav                # rip to WAV
 rend-wui -T '<year>/<album>/<number> <title>'   # custom naming template
+rend-wui --drive-name 'sr0=Living Room'   # label the drive with a friendly name
 rend-wui --demo                # simulated disc, no hardware required
 ```
 
@@ -234,6 +244,9 @@ as a service:
   get their own subdirectory only when several rip at once
 - `REND_WUI_HOST` — the address to bind the server to (`--host`)
 - `REND_WUI_PORT` — the port to bind the server to (`--port`)
+- `REND_DRIVE_NAMES` — comma-separated `DRIVE=NAME` pairs giving drives
+  friendly names (`--drive-name`); `sr0` and `/dev/sr0` name the same drive.
+  Works with `rend` and `rend-tui` too
 
 A flag given on the command line overrides the environment.
 

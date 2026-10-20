@@ -190,3 +190,24 @@ fn info_with_missing_device_fails_cleanly() {
         .failure()
         .stderr(contains("device /dev/sr-definitely-not-there not found"));
 }
+
+#[test]
+fn drives_rejects_a_malformed_drive_name() {
+    // The pair is validated before discovery, so this fails the same way
+    // with or without hardware.
+    bin()
+        .args(["drives", "--drive-name", "living-room"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid --drive-name"));
+}
+
+#[test]
+fn drives_help_lists_the_drive_name_flag() {
+    bin()
+        .args(["drives", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--drive-name"))
+        .stdout(contains("REND_DRIVE_NAMES"));
+}
