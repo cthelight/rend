@@ -211,3 +211,35 @@ fn drives_help_lists_the_drive_name_flag() {
         .stdout(contains("--drive-name"))
         .stdout(contains("REND_DRIVE_NAMES"));
 }
+
+#[test]
+fn drives_help_lists_the_drive_order_flag() {
+    bin()
+        .args(["drives", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--drive-order"))
+        .stdout(contains("REND_DRIVE_ORDER"));
+}
+
+#[test]
+fn drives_accepts_a_drive_order_from_the_environment() {
+    // The value is parsed before discovery, so with no hardware the
+    // command still reaches the no-devices error. On a machine with a
+    // CD-ROM present we only assert the flag parses, since the ordering
+    // itself needs hardware to observe.
+    if has_cdrom_device() {
+        bin()
+            .args(["drives", "--help"])
+            .assert()
+            .success()
+            .stdout(contains("--drive-order"));
+        return;
+    }
+    bin()
+        .args(["drives"])
+        .env("REND_DRIVE_ORDER", "sr1, sr0")
+        .assert()
+        .failure()
+        .stderr(contains("no CD-ROM devices"));
+}

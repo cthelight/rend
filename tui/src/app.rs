@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
 
-use rend_core::{Device, DriveNames, DriveStatus, FRAME_SIZE, Toc, drive_label};
+use rend_core::{
+    Device, DriveNames, DriveOrder, DriveStatus, FRAME_SIZE, Toc, drive_label, order_drives,
+};
 use rend_encode::{Format, FormatSet};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, lookup_candidates,
@@ -487,6 +489,7 @@ impl App {
         selected_formats: Vec<Format>,
         template: Template,
         drive_names: DriveNames,
+        drive_order: DriveOrder,
         demo: bool,
     ) -> Self {
         let selected_formats = if selected_formats.is_empty() {
@@ -556,7 +559,7 @@ impl App {
                     }
                 },
             };
-            app.drives = devices
+            app.drives = order_drives(devices, &drive_order, Device::path)
                 .into_iter()
                 .map(|dev| Drive::real(dev, drive_names.clone()))
                 .collect();
@@ -1827,6 +1830,7 @@ mod tests {
             vec![Format::default()],
             Template::default(),
             DriveNames::default(),
+            DriveOrder::default(),
             true,
         )
     }
@@ -2522,6 +2526,7 @@ mod tests {
             vec![Format::default()],
             Template::default(),
             DriveNames::default(),
+            DriveOrder::default(),
             false,
         );
         // Selected while empty: the (asynchronous) TOC read failed.

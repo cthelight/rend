@@ -10,6 +10,7 @@ pub mod device;
 pub mod error;
 pub mod msf;
 pub mod names;
+pub mod order;
 pub mod sys;
 pub mod toc;
 
@@ -18,4 +19,5 @@ pub use device::{Device, DeviceInfo, DiscStatus, DriveStatus};
 pub use error::Error;
 pub use msf::Msf;
 pub use names::{DriveNames, drive_label};
+pub use order::{DriveOrder, order_drives};
 pub use toc::{Toc, Track, TrackType};

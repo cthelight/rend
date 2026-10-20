@@ -20,7 +20,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rend_core::DriveNames;
+use rend_core::{DriveNames, DriveOrder};
 use rend_encode::FormatSet;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 
@@ -81,6 +81,17 @@ struct Cli {
     )]
     drive_names: Vec<String>,
 
+    /// The order to list the drives in (repeatable; `sr0` or `/dev/sr0`):
+    /// the listed drives first, in the given order, the rest after them.
+    /// Also `REND_DRIVE_ORDER`, comma-separated.
+    #[arg(
+        long = "drive-order",
+        value_name = "DRIVE",
+        value_delimiter = ',',
+        env = "REND_DRIVE_ORDER"
+    )]
+    drive_order: Vec<String>,
+
     /// Run against a simulated disc (no hardware required).
     #[arg(long)]
     demo: bool,
@@ -106,6 +117,7 @@ fn run(cli: &Cli) -> io::Result<()> {
         .map_err(io::Error::other)?;
     let drive_names = DriveNames::from_pairs(&cli.drive_names)
         .map_err(|e| io::Error::other(format!("invalid --drive-name: {e}")))?;
+    let drive_order = DriveOrder::from_parts(&cli.drive_order);
     let mut app = App::new(
         cli.device.as_deref(),
         cli.output_dir.clone(),
@@ -114,6 +126,7 @@ fn run(cli: &Cli) -> io::Result<()> {
         selected,
         template,
         drive_names,
+        drive_order,
         cli.demo,
     );
     let mut terminal = setup_terminal()?;

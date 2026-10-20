@@ -41,14 +41,19 @@ rend eject                     # eject the disc
 
 rend -d /dev/sr1 toc           # use a specific device (default: first found)
 rend drives --drive-name 'sr0=Living Room'   # label /dev/sr0 with a friendly name
+rend drives --drive-order sr1,sr0            # list /dev/sr1 before /dev/sr0
 ```
 
 Drives are listed by vendor and model. `--drive-name DRIVE=NAME` (repeatable;
 `sr0` and `/dev/sr0` both name the same drive) shows a friendly name instead,
 and `REND_DRIVE_NAMES` does the same from the environment as
-comma-separated pairs (e.g. `sr0=Living Room,sr1=Office`). A flag given on
-the command line overrides the environment. The flag and the variable also
-work with `rend-tui` and `rend-wui`.
+comma-separated pairs (e.g. `sr0=Living Room,sr1=Office`). Drives are listed
+in discovery order by default; `--drive-order DRIVE` (repeatable) lists the
+drives it names first, in the given order, with the rest after them, and
+`REND_DRIVE_ORDER` does the same from the environment as a comma-separated
+list (e.g. `sr1,sr0`). A flag given on the command line overrides the
+environment. The flags and the variables also work with `rend-tui` and
+`rend-wui`.
 
 Ripped files are named after the looked-up metadata when it is available:
 each track goes into a per-artist, per-album directory as
@@ -148,6 +153,7 @@ rend-tui -F flac -F mp3:192    # rip to FLAC and 192 kbps MP3
 rend-tui -F wav                # rip to WAV
 rend-tui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-tui --drive-name 'sr0=Living Room'   # label the drive with a friendly name
+rend-tui --drive-order sr1,sr0            # list the drives in a given order
 rend-tui --demo                # simulated disc, no hardware required
 ```
 
@@ -227,6 +233,7 @@ rend-wui -F flac -F mp3:192    # rip to FLAC and 192 kbps MP3
 rend-wui -F wav                # rip to WAV
 rend-wui -T '<year>/<album>/<number> <title>'   # custom naming template
 rend-wui --drive-name 'sr0=Living Room'   # label the drive with a friendly name
+rend-wui --drive-order sr1,sr0            # list the drives in a given order
 rend-wui --demo                # simulated disc, no hardware required
 ```
 
@@ -247,6 +254,9 @@ as a service:
 - `REND_DRIVE_NAMES` — comma-separated `DRIVE=NAME` pairs giving drives
   friendly names (`--drive-name`); `sr0` and `/dev/sr0` name the same drive.
   Works with `rend` and `rend-tui` too
+- `REND_DRIVE_ORDER` — comma-separated drives to list first, in the given
+  order (`--drive-order`); `sr0` and `/dev/sr0` name the same drive. Works
+  with `rend` and `rend-tui` too
 
 A flag given on the command line overrides the environment.
 

@@ -938,7 +938,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use rend_core::{DriveNames, TrackType};
+    use rend_core::{DriveNames, DriveOrder, TrackType};
     use rend_encode::{Format, FormatSet};
     use rend_meta::Template;
 
@@ -985,6 +985,7 @@ mod tests {
             vec![Format::default()],
             Template::default(),
             DriveNames::default(),
+            DriveOrder::default(),
             true,
         )
     }

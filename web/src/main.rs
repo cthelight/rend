@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use rend_core::DriveNames;
+use rend_core::{DriveNames, DriveOrder};
 use rend_encode::FormatSet;
 use rend_meta::{DEFAULT_TEMPLATE, Template};
 use rend_wui::api::router;
@@ -64,6 +64,17 @@ struct Cli {
     )]
     drive_names: Vec<String>,
 
+    /// The order to list the drives in (repeatable; `sr0` or `/dev/sr0`):
+    /// the listed drives first, in the given order, the rest after them.
+    /// Also `REND_DRIVE_ORDER`, comma-separated.
+    #[arg(
+        long = "drive-order",
+        value_name = "DRIVE",
+        value_delimiter = ',',
+        env = "REND_DRIVE_ORDER"
+    )]
+    drive_order: Vec<String>,
+
     /// Use the built-in simulated disc instead of real devices.
     #[arg(long)]
     demo: bool,
@@ -97,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![formats.default_format()]
     };
     let drive_names = DriveNames::from_pairs(&cli.drive_names)?;
+    let drive_order = DriveOrder::from_parts(&cli.drive_order);
     let state = AppState::new(
         cli.output_dir,
         cli.device.as_deref(),
@@ -105,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.force,
         template,
         drive_names,
+        drive_order,
         cli.drive_dirs,
         cli.demo,
     )?;

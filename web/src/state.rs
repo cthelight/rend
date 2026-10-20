@@ -14,7 +14,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use rend_core::{Device, DeviceInfo, DriveNames, DriveStatus, Toc, drive_label};
+use rend_core::{
+    Device, DeviceInfo, DriveNames, DriveOrder, DriveStatus, Toc, drive_label, order_drives,
+};
 use rend_encode::{Format, FormatSet, QualityKind};
 use rend_meta::{
     Candidate, DiscMeta, DiscToc, MetaCache, Template, TrackMeta, cover_art, fetch_image,
@@ -207,6 +209,7 @@ impl AppState {
         force: bool,
         template: Template,
         drive_names: DriveNames,
+        drive_order: DriveOrder,
         drive_dirs: Option<bool>,
         demo: bool,
     ) -> Result<Arc<Self>, String> {
@@ -222,7 +225,7 @@ impl AppState {
                 },
                 None => Device::discover().unwrap_or_default(),
             };
-            devices
+            order_drives(devices, &drive_order, Device::path)
                 .into_iter()
                 .map(|device| Drive::real(device, drive_names.clone()))
                 .collect()
@@ -1949,6 +1952,7 @@ mod tests {
             force,
             Template::default(),
             DriveNames::default(),
+            DriveOrder::default(),
             drive_dirs,
             true,
         )
@@ -2000,6 +2004,7 @@ mod tests {
             false,
             Template::default(),
             DriveNames::default(),
+            DriveOrder::default(),
             None,
             true,
         )

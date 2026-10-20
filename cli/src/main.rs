@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::Parser;
-use rend_core::{Device, DriveNames, Error, FRAMES_PER_SECOND, Toc, drive_label};
+use rend_core::{
+    Device, DriveNames, DriveOrder, Error, FRAMES_PER_SECOND, Toc, drive_label, order_drives,
+};
 use rend_encode::{Format, FormatSet};
 use rend_meta::{
     Candidate, DEFAULT_TEMPLATE, DiscMeta, DiscToc, MetaCache, Template, cover_art, disc_id,
@@ -40,6 +42,16 @@ enum Command {
             env = "REND_DRIVE_NAMES"
         )]
         drive_names: Vec<String>,
+        /// The order to list the drives in (repeatable; `sr0` or
+        /// `/dev/sr0`): the listed drives first, in the given order, the
+        /// rest after them. Also `REND_DRIVE_ORDER`, comma-separated.
+        #[arg(
+            long = "drive-order",
+            value_name = "DRIVE",
+            value_delimiter = ',',
+            env = "REND_DRIVE_ORDER"
+        )]
+        drive_order: Vec<String>,
     },
     /// Show the table of contents of the disc.
     Toc,
@@ -114,7 +126,10 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
-        Command::Drives { drive_names } => cmd_drives(&drive_names),
+        Command::Drives {
+            drive_names,
+            drive_order,
+        } => cmd_drives(&drive_names, &drive_order),
         Command::Toc => cmd_toc(single_device(&cli.devices)?),
         Command::Rip { args } => cmd_rip(&cli.devices, &args),
         Command::Info { matches, r#match } => {
@@ -167,16 +182,17 @@ fn open_device(path: Option<&str>) -> Result<Device, Error> {
     }
 }
 
-fn cmd_drives(drive_names: &[String]) -> Result<(), Error> {
+fn cmd_drives(drive_names: &[String], drive_order: &[String]) -> Result<(), Error> {
     // Parsed before discovery so a malformed pair fails even with no
     // hardware present.
     let names = DriveNames::from_pairs(drive_names)
         .map_err(|e| Error::Unexpected(format!("invalid --drive-name: {e}")))?;
+    let order = DriveOrder::from_parts(drive_order);
     let devices = Device::discover()?;
     if devices.is_empty() {
         return Err(Error::NoDevices);
     }
-    for dev in &devices {
+    for dev in order_drives(devices, &order, Device::path) {
         let info = dev.info()?;
         let label = drive_label(&names, &info);
         println!("{:<10} {:<36} {}", info.path, label, info.drive_status);
