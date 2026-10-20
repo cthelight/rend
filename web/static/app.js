@@ -390,14 +390,14 @@ function tocTable(audioTracks, checked, active, titles, rip, existingTracks) {
               <td class="col-num">${track.number}</td>
               <td class="title">
                 ${
+                  existingTracks.has(track.number)
+                    ? '<span class="exists-dot" role="img" aria-label="Output files already exist"></span>'
+                    : ""
+                }
+                ${
                   title
                     ? escapeHtml(title)
                     : `<span class="track-fallback">Track ${track.number}</span>`
-                }
-                ${
-                  existingTracks.has(track.number)
-                    ? '<span class="exists-badge" title="output files already exist">exists</span>'
-                    : ""
                 }
               </td>
               <td class="col-dur">${duration(track.durationSecs)}</td>

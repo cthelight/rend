@@ -1226,20 +1226,53 @@ input[type="text"]:focus {
   font-size: 0.92rem;
 }
 
-.exists-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 0.45rem;
-  padding: 0.08rem 0.4rem;
-  border-radius: 999px;
-  font-size: 0.66rem;
-  font-weight: 650;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: var(--amber);
-  background: rgba(251, 191, 36, 0.08);
-  border: 1px solid rgba(251, 191, 36, 0.28);
+/* A quiet mark before the track name: some of its output files are
+   already on disk, so a re-rip will offer keep or overwrite. The hover
+   tooltip is a styled ::after, not the browser's native title hint. */
+.exists-dot {
+  position: relative;
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 0.5rem;
+  border-radius: 50%;
+  background: var(--amber);
   vertical-align: middle;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.exists-dot:hover {
+  transform: scale(1.4);
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.55);
+}
+
+/* The tooltip text is the dot's aria-label: one string, read by both
+   the hover tooltip and screen readers. */
+.exists-dot::after {
+  content: attr(aria-label);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: -5px;
+  padding: 0.32rem 0.6rem;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  pointer-events: none;
+  z-index: 30;
+}
+
+.exists-dot:hover::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 /* ---------- rip (merged into the track table) ---------- */
