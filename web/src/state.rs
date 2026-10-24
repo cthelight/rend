@@ -1654,6 +1654,7 @@ impl Drive {
         self.cover_custom = false;
         self.meta_edited = false;
         self.toc_failed = false;
+        self.rip = None;
         self.lookup_status = "no disc".to_string();
     }
 
@@ -2387,6 +2388,38 @@ mod tests {
         assert!(drive.mcn.is_none());
         assert_eq!(drive.lookup_status, "no disc");
         assert!(!drive.meta_edited);
+    }
+
+    #[test]
+    fn a_positive_empty_tray_clears_the_last_rip() {
+        let mut drive = loaded_drive();
+        drive.rip = Some(RipControl {
+            active: false,
+            stopped: false,
+            tracks: vec![1, 2],
+            out_dir: "/out".into(),
+            formats: vec![Format::parse("wav").unwrap()],
+            force: false,
+            toc: DemoDisc::new().toc,
+            states: vec![
+                RipTrackState {
+                    number: 1,
+                    state: TrackState::Done { bytes: 1024 },
+                },
+                RipTrackState {
+                    number: 2,
+                    state: TrackState::Done { bytes: 2048 },
+                },
+            ],
+            summary: Some("ripped 2 of 2 track(s)".into()),
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            forwarder: None,
+        });
+
+        drive.apply_poll(Some(drive_info(DriveStatus::NoDisc)));
+
+        assert!(drive.rip.is_none());
     }
 
     #[test]
