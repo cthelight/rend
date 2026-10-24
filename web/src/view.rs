@@ -324,13 +324,20 @@ impl ServerEvent {
     }
 }
 
-/// Encode cover art bytes as a data URL, sniffing the image format.
+/// Encode cover art as a data URL the browser can display.
 ///
-/// Returns `None` when the bytes do not look like an image the browser
-/// can display.
+/// The bytes are normalised first (see [`rend_meta::normalize_art`]) so the
+/// preview always matches what gets embedded in the files: small JPEG and
+/// PNG art passes through unchanged, anything else is re-encoded as JPEG.
+/// Browsers cannot display formats such as BMP or TIFF, so leaving them raw
+/// would show a broken image even though the files are tagged correctly.
+///
+/// Returns `None` when the bytes do not decode, in which case the tag is
+/// dropped too and the UI falls back to the placeholder.
 pub fn cover_data_url(bytes: &[u8]) -> Option<String> {
-    let mime = rend_meta::sniff_mime(bytes)?;
-    Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+    let art = rend_meta::normalize_art(bytes).ok()?;
+    let mime = rend_meta::sniff_mime(&art)?;
+    Some(format!("data:{mime};base64,{}", STANDARD.encode(&art)))
 }
 
 /// Decode user-supplied cover art into raw bytes.
@@ -359,26 +366,60 @@ pub fn decode_image_data(input: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    /// A valid 1x1 RGB PNG.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x09, 0x70, 0x48, 0x59, 0x73, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x4F, 0x25, 0xC4, 0xD6, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44,
+        0x41, 0x54, 0x78, 0x9C, 0x63, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0xF6,
+        0x17, 0x38, 0x55, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// A valid 1x1 lossless WebP.
+    const WEBP_1X1: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x1C, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x4C, 0x0F, 0x00, 0x00, 0x00, 0x2F, 0x00, 0x00, 0x00, 0x00, 0x07, 0x10, 0xF5, 0x8F, 0xFE,
+        0x07, 0x22, 0xA2, 0xFF, 0x01, 0x00,
+    ];
+
+    /// A valid 1x1 24-bit BMP.
+    const BMP_1X1: &[u8] = &[
+        0x42, 0x4D, 0x3A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x00, 0x00, 0x00, 0x28,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x18, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x01, 0x00,
+    ];
+
     #[test]
-    fn cover_sniffs_known_formats() {
-        assert_eq!(
-            cover_data_url(&[0x89, b'P', b'N', b'G', 0, 0, 0, 0]),
-            Some("data:image/png;base64,iVBORwAAAAA=".to_string())
+    fn cover_preview_is_browser_renderable() {
+        // Small JPEG/PNG art passes through unchanged, keeping its format.
+        assert!(
+            cover_data_url(PNG_1X1)
+                .unwrap()
+                .starts_with("data:image/png;base64,")
         );
-        assert_eq!(
-            cover_data_url(&[0xFF, 0xD8, 0xFF, 0xE0]),
-            Some("data:image/jpeg;base64,/9j/4A==".to_string())
+        // Formats a browser cannot display are re-encoded to JPEG, the same
+        // bytes that get embedded in the files.
+        assert!(
+            cover_data_url(WEBP_1X1)
+                .unwrap()
+                .starts_with("data:image/jpeg;base64,")
         );
-        assert_eq!(
-            cover_data_url(b"GIF89a\x01\x00"),
-            Some("data:image/gif;base64,R0lGODlhAQA=".to_string())
+        assert!(
+            cover_data_url(BMP_1X1)
+                .unwrap()
+                .starts_with("data:image/jpeg;base64,")
         );
-        assert_eq!(
-            cover_data_url(b"BM\x00\x00"),
-            Some("data:image/bmp;base64,Qk0AAA==".to_string())
-        );
-        assert_eq!(cover_data_url(b"RIIF\x00\x00"), None);
-        assert_eq!(cover_data_url(b"RI"), None);
+    }
+
+    #[test]
+    fn cover_preview_rejects_undecodable_bytes() {
+        assert_eq!(cover_data_url(b"<html>"), None);
+        assert_eq!(cover_data_url(b""), None);
+        // Sniffable but truncated: no preview, matching the dropped tag.
+        assert_eq!(cover_data_url(&[0x89, b'P', b'N', b'G', 0, 0, 0, 0]), None);
+        assert_eq!(cover_data_url(&[0xFF, 0xD8, 0xFF, 0xE0]), None);
     }
 
     #[test]

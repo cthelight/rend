@@ -20,7 +20,7 @@ pub mod throttle;
 
 pub use cache::MetaCache;
 pub use discid::{disc_id, mb_discid};
-pub use image::{fetch_image, sniff_mime};
+pub use image::{ImageError, fetch_image, normalize_art, sniff_mime};
 pub use lookup::{
     Candidate, DiscMeta, DiscToc, TrackMeta, cover_art, lookup_candidates, lookup_disc,
     lookup_disc_all, register_disc_id_url,
