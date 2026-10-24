@@ -291,9 +291,18 @@ network, no package manager, and the final stage is `scratch` with every
 file copied in explicitly, so the whole image is a few MB.
 
 ```sh
-make docker       # build the image as rend-wui:local
-make docker-demo  # run it with the simulated disc on http://127.0.0.1:3000/
+make docker         # build the image for the host platform as rend-wui:local
+make docker-demo    # run it with the simulated disc on http://127.0.0.1:3000/
+make docker_tag     # build the host-platform image as cthelight/rend-wui:<tag>
+make push           # push the host-platform image to the registry
+make multiarch_push # build linux/amd64 and linux/arm64/v8, push
 ```
+
+The tag defaults to `git describe --tags --always` (the version when HEAD is
+tagged, the short SHA otherwise); override it with `TAG=…`. `PLATFORMS` and
+`IMAGE_NAME_NO_VER` can likewise be overridden for `multiarch_push` and the
+push targets. Multi-arch images cannot be loaded into a local docker daemon,
+so `multiarch_push` always pushes (and asks for confirmation first).
 
 To rip a real disc, hand the container the CD-ROM device and a volume for
 the output:
@@ -310,8 +319,9 @@ Inside the container the server binds `0.0.0.0:3000` by default and writes
 to `/output`; the host is an environment default (`REND_WUI_HOST`) that
 `--host`, `--port`, or `REND_WUI_PORT` override, `-o` and
 `REND_WUI_OUTPUT_DIR` move the output, and every other flag and
-`REND_WUI_*` environment variable works as described above. The image
-is built for x86_64. Metadata lookup still needs outbound internet access
+`REND_WUI_*` environment variable works as described above. The image is
+multi-arch (linux/amd64 and linux/arm64/v8); each platform compiles its own
+static binaries. Metadata lookup still needs outbound internet access
 and stays best effort — without it, rips are simply written untagged.
 
 ## Development

@@ -4,8 +4,11 @@
 # ffmpeg that only accepts raw PCM on a pipe and encodes the five audio
 # formats rend supports, and exactly the shared libraries ffmpeg links
 # against (musl's loader plus libmp3lame/libopus/libvorbis/libogg).
-# Nothing else —
-# the final stage is scratch and every file is copied in explicitly.
+# Nothing else — the final stage is scratch and every file is copied in
+# explicitly. Multi-arch: each build platform compiles its own native
+# binaries (rust:alpine and alpine both ship amd64 and arm64/v8), so build
+# with `docker buildx build --platform linux/amd64,linux/arm64/v8`
+# (see the Makefile targets).
 
 ARG FFMPEG_VERSION=8.0
 ARG RUST_VERSION=1.89
@@ -53,22 +56,33 @@ RUN ./configure \
 
 # --- rend-wui: static musl build ------------------------------------------
 FROM rust:${RUST_VERSION}-alpine AS builder
-RUN apk add --no-cache build-base musl-dev \
-    && rustup target add x86_64-unknown-linux-musl
+ARG TARGETARCH
+RUN apk add --no-cache build-base musl-dev
+# Map the build platform to the Rust musl target triple and remember it in
+# /etc/rust-target for the build step below.
+RUN case "${TARGETARCH}" in \
+        amd64) T=x86_64-unknown-linux-musl ;; \
+        arm64) T=aarch64-unknown-linux-musl ;; \
+        *)     echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && rustup target add "${T}" \
+    && echo "RUST_TARGET=${T}" > /etc/rust-target
 WORKDIR /src
 COPY . /src
 # The build dir is a cache mount and is not committed to the stage, so the
 # finished binary is installed to a regular path.
 RUN --mount=type=cache,target=/src/target \
-    cargo build --release --target x86_64-unknown-linux-musl --package rend-wui \
-    && install -m 0755 target/x86_64-unknown-linux-musl/release/rend-wui /usr/local/bin/rend-wui \
+    . /etc/rust-target \
+    && cargo build --release --target "${RUST_TARGET}" --package rend-wui \
+    && install -m 0755 "target/${RUST_TARGET}/release/rend-wui" /usr/local/bin/rend-wui \
     && strip /usr/local/bin/rend-wui
 
 # --- runtime: the two binaries and ffmpeg's shared libs, on scratch -------
 FROM scratch
 COPY --from=ffmpeg /opt/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /opt/deps/ /lib/
-COPY --from=ffmpeg /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+# The glob resolves to this platform's loader (ld-musl-x86_64/aarch64.so.1).
+COPY --from=ffmpeg /lib/ld-musl-*.so.1 /lib/
 COPY --from=builder /usr/local/bin/rend-wui /usr/local/bin/rend-wui
 # Explicit PATH: the bare `rend-wui` entrypoint and rend-wui's `ffmpeg`
 # child process are both resolved through it. Without this, startup depends
